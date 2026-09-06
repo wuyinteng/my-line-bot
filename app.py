@@ -104,11 +104,24 @@ def get_holding_shares_info(stock_id):
     except: return ""
 
 def upload_imgbb(buf):
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": img_base64})
-    if res.status_code == 200: return res.json()['data']['url']
-    return None
+    if not IMGBB_API_KEY:
+        print("❌ 錯誤：Render 環境變數中沒有找到 IMGBB_API_KEY！", flush=True)
+        return None
+    try:
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": img_base64}, timeout=10)
+        print(f"ImgBB 回應狀態碼：{res.status_code}", flush=True)
+        if res.status_code == 200: 
+            url = res.json()['data']['url']
+            print(f"✅ 圖片上傳成功，網址：{url}", flush=True)
+            return url
+        else:
+            print(f"❌ ImgBB 上傳失敗，回應：{res.text}", flush=True)
+            return None
+    except Exception as e:
+        print(f"❌ upload_imgbb 發生例外錯誤：{e}", flush=True)
+        return None
 
 def calc_ylim(series):
     s_min, s_max = series.min(), series.max()
@@ -436,7 +449,6 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片產生失敗。", quick_reply=qr_buttons))
         return
         
-    result = get_quote(user_msg)
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
     else:
