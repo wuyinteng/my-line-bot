@@ -24,6 +24,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 
+
 app = Flask(__name__)
 
 # ==========================================
@@ -440,6 +441,32 @@ def handle_message(event):
     result = get_quote(user_msg)
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_msg = event.message.text
+    
+    if user_msg == 'K線圖':
+        # --- 1. 這裡放你抓資料跟畫圖的程式碼 ---
+        # df = yf.download(...)
+        # plt.plot(...)
+        
+        # --- 2. 畫完圖後，將圖片存到 static 資料夾裡 ---
+        plt.savefig('static/chart.png') 
+        plt.close()  # 存檔後務必關閉畫布，避免伺服器記憶體爆掉
+        
+        # --- 3. 將網址打包成 ImageSendMessage 並回傳 ---
+        # ⚠️ 注意：請把下面的網址換成你真實的 Render 網址
+        image_message = ImageSendMessage(
+            original_content_url='https://你的專案名稱.onrender.com/static/chart.png',
+            preview_image_url='https://你的專案名稱.onrender.com/static/chart.png'
+        )
+        
+        # 呼叫 API 回傳給使用者
+        line_bot_api.reply_message(
+            event.reply_token,
+            image_message
+        )
 
 # ==========================================
 # ⏰ 6. 啟動伺服器與鬧鐘排程
