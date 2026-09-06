@@ -104,25 +104,25 @@ def get_holding_shares_info(stock_id):
     except: return ""
 
 def upload_imgbb(buf):
-    if not IMGBB_API_KEY:
-        print("❌ 錯誤：Render 環境變數中沒有找到 IMGBB_API_KEY！", flush=True)
-        return None
     try:
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": img_base64}, timeout=10)
-        print(f"ImgBB 回應狀態碼：{res.status_code}", flush=True)
-        if res.status_code == 200: 
-            url = res.json()['data']['url']
-            print(f"✅ 圖片上傳成功，網址：{url}", flush=True)
-            return url
-        else:
-            print(f"❌ ImgBB 上傳失敗，回應：{res.text}", flush=True)
-            return None
+        # 確保雲端主機上有 static 資料夾
+        os.makedirs('static', exist_ok=True)
+        
+        # 將圖片存到 Render 雲端主機的硬碟中
+        filepath = 'static/chart.png'
+        with open(filepath, 'wb') as f:
+            f.write(buf.getvalue())
+            
+        # 自動產生 Render 雲端網站的公開網址（加上時間戳記防 LINE 快取舊圖）
+        base_url = request.host_url.replace('http://', 'https://')
+        image_url = f"{base_url}static/chart.png?v={int(time.time())}"
+        
+        print(f"✅ 圖片已成功存入雲端，網址：{image_url}", flush=True)
+        return image_url
     except Exception as e:
-        print(f"❌ upload_imgbb 發生例外錯誤：{e}", flush=True)
+        print(f"❌ 雲端存檔失敗：{e}", flush=True)
         return None
-
+    
 def calc_ylim(series):
     s_min, s_max = series.min(), series.max()
     rng = s_max - s_min
