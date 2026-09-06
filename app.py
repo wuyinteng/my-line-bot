@@ -6,7 +6,6 @@ import time
 import matplotlib
 matplotlib.use('Agg')  # 必須在 import pyplot 之前執行
 import matplotlib.pyplot as plt
-from linebot.models import ImageSendMessage
 import yfinance as yf
 from FinMind.data import DataLoader
 import datetime
@@ -23,9 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import warnings
 warnings.filterwarnings("ignore")
 
-
 import mplfinance as mpf
-
 
 app = Flask(__name__)
 
@@ -281,7 +278,7 @@ def generate_inst_margin_chart(stock_id):
         return None
 
 # ==========================================
-# 🚀 4. [新增] 8:50 盤前戰情總匯引擎
+# 🚀 4. 8:50 盤前戰情總匯引擎
 # ==========================================
 def get_intraday_chart_url(ticker_symbol, title_name):
     try:
@@ -302,14 +299,13 @@ def get_intraday_chart_url(ticker_symbol, title_name):
     return None
 
 def morning_all_in_one_report():
-    if MY_USER_ID == "請替換成您的_USER_ID":
+    if not MY_USER_ID or MY_USER_ID == "請替換成您的_USER_ID":
         print("尚未設定 MY_USER_ID，無法發送盤前報告")
         return
 
     messages_to_send = []
     text_lines = ["🌅 【8:50 盤前戰情總匯】\n"]
     
-    # 1. 美股四大指數
     text_lines.append("🌎 美股收盤現況：")
     us_targets = {"^DJI": "道瓊", "^GSPC": "標普", "^IXIC": "那斯達克", "^SOX": "費半"}
     for ticker, name in us_targets.items():
@@ -322,7 +318,6 @@ def morning_all_in_one_report():
                 text_lines.append(f"▪️ {name}: {tc:.2f} ({sp}{pp:+.2f}%)")
         except: continue
 
-    # 2. 美股期貨強勢類股
     text_lines.append("\n🚀 盤前美股期貨動能：")
     fut_targets = {
         "YM=F": {"name": "小道瓊", "sector": "傳統/工業"},
@@ -339,7 +334,6 @@ def morning_all_in_one_report():
                 text_lines.append(f"▪️ {info['name']} ({info['sector']}): {sp} ({pp:+.2f}%)")
         except: continue
 
-    # 3. 外資台指期空單動向
     text_lines.append("\n🚨 籌碼：外資台指期動向")
     try:
         start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
@@ -358,11 +352,9 @@ def morning_all_in_one_report():
     except:
         text_lines.append("▪️ 今日籌碼資料暫未更新")
 
-    # 將所有文字組合成第一則 Bubble
     final_text = "\n".join(text_lines)
     messages_to_send.append(TextSendMessage(text=final_text))
 
-    # 4. 日韓股走勢圖
     jp_url = get_intraday_chart_url("^N225", "日經225 (Japan)")
     if jp_url:
         messages_to_send.append(ImageSendMessage(original_content_url=jp_url, preview_image_url=jp_url))
@@ -371,7 +363,6 @@ def morning_all_in_one_report():
     if kr_url:
         messages_to_send.append(ImageSendMessage(original_content_url=kr_url, preview_image_url=kr_url))
 
-    # 5. 推播發送 (僅扣除 1 則額度)
     try:
         line_bot_api.push_message(MY_USER_ID, messages_to_send)
     except Exception as e:
@@ -395,7 +386,12 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip().upper()
-    try: requests.post("https://api.line.me/v2/bot/chat/loading/start", headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"}, json={"chatId": event.source.sender_id, "loadingSeconds": 15})
+    try: 
+        requests.post(
+            "https://api.line.me/v2/bot/chat/loading/start", 
+            headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"}, 
+            json={"chatId": event.source.sender_id, "loadingSeconds": 15}
+        )
     except: pass
 
     btn_target = user_msg.replace("K", "").replace("走", "")
@@ -443,35 +439,8 @@ def handle_message(event):
     result = get_quote(user_msg)
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_msg = event.message.text
-   
-# 判斷使用者是不是輸入「K線圖」
-    if user_msg == "K線圖":
-        # 1. 抓取台積電股價資料
-        df = yf.download("2330.TW", period="1mo")
-        
-        # 2. 畫出簡單的折線圖
-        plt.figure(figsize=(10, 5))
-        plt.plot(df.index, df['Close'])
-        plt.title('2330.TW K-line')
-        
-        # 3. 存檔到 static 資料夾中
-        plt.savefig('static/chart.png')
-        plt.close()  # 畫完後關閉畫布，釋放記憶體
-        
-        # 4. 動態組合出公開網址（加上時間戳記避免 LINE 吃到舊圖快取）
-        base_url = request.host_url.replace('http://', 'https://')
-        image_url = f"{base_url}static/chart.png?v={int(time.time())}"
-        
-        # 5. 包裝成 LINE 圖片訊息並回傳
-        image_message = ImageSendMessage(
-            original_content_url=image_url,
-            preview_image_url=image_url
-        )
-        line_bot_api.reply_message(event.reply_token, image_message)
+    else:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確的台股代碼（例如：2330），或輸入 K2330 查看三圖流。", quick_reply=qr_buttons))
 
 # ==========================================
 # ⏰ 6. 啟動伺服器與鬧鐘排程
