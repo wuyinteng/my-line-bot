@@ -1,0 +1,11 @@
+Flask==2.2.5
+line-bot-sdk==2.4.0
+yfinance
+FinMind
+pandas
+requests
+beautifulsoup4
+APScheduler
+matplotlib
+mplfinance
+gunicorn
