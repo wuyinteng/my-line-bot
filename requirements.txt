@@ -1,5 +1,5 @@
 Flask==2.2.5
-line-bot-sdk==2.4.0
+line-bot-sdk==2.4.3
 yfinance
 FinMind
 pandas
