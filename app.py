@@ -2,7 +2,11 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage, QuickReply, QuickReplyButton, MessageAction
-
+import time
+import matplotlib
+matplotlib.use('Agg')  # 必須在 import pyplot 之前執行
+import matplotlib.pyplot as plt
+from linebot.models import ImageSendMessage
 import yfinance as yf
 from FinMind.data import DataLoader
 import datetime
@@ -19,9 +23,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import warnings
 warnings.filterwarnings("ignore")
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+
 import mplfinance as mpf
 
 
@@ -445,28 +447,31 @@ def handle_message(event):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text
-    
-    if user_msg == 'K線圖':
-        # --- 1. 這裡放你抓資料跟畫圖的程式碼 ---
-        # df = yf.download(...)
-        # plt.plot(...)
+   
+# 判斷使用者是不是輸入「K線圖」
+    if user_msg == "K線圖":
+        # 1. 抓取台積電股價資料
+        df = yf.download("2330.TW", period="1mo")
         
-        # --- 2. 畫完圖後，將圖片存到 static 資料夾裡 ---
-        plt.savefig('static/chart.png') 
-        plt.close()  # 存檔後務必關閉畫布，避免伺服器記憶體爆掉
+        # 2. 畫出簡單的折線圖
+        plt.figure(figsize=(10, 5))
+        plt.plot(df.index, df['Close'])
+        plt.title('2330.TW K-line')
         
-        # --- 3. 將網址打包成 ImageSendMessage 並回傳 ---
-        # ⚠️ 注意：請把下面的網址換成你真實的 Render 網址
+        # 3. 存檔到 static 資料夾中
+        plt.savefig('static/chart.png')
+        plt.close()  # 畫完後關閉畫布，釋放記憶體
+        
+        # 4. 動態組合出公開網址（加上時間戳記避免 LINE 吃到舊圖快取）
+        base_url = request.host_url.replace('http://', 'https://')
+        image_url = f"{base_url}static/chart.png?v={int(time.time())}"
+        
+        # 5. 包裝成 LINE 圖片訊息並回傳
         image_message = ImageSendMessage(
-            original_content_url='https://你的專案名稱.onrender.com/static/chart.png',
-            preview_image_url='https://你的專案名稱.onrender.com/static/chart.png'
+            original_content_url=image_url,
+            preview_image_url=image_url
         )
-        
-        # 呼叫 API 回傳給使用者
-        line_bot_api.reply_message(
-            event.reply_token,
-            image_message
-        )
+        line_bot_api.reply_message(event.reply_token, image_message)
 
 # ==========================================
 # ⏰ 6. 啟動伺服器與鬧鐘排程
