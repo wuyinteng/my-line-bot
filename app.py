@@ -119,17 +119,34 @@ def get_holding_shares_info(stock_id):
 
 def upload_imgbb(buf):
     try:
-        if not IMGBB_API_KEY: return None, "❌ 找不到 IMGBB_API_KEY"
+        if not IMGBB_API_KEY:
+            print("❌ 找不到 IMGBB_API_KEY", flush=True)
+            return None
+            
         url = "https://api.imgbb.com/1/upload"
-        payload = {"key": IMGBB_API_KEY, "image": base64.b64encode(buf.getvalue()).decode('utf-8')}
-        res = requests.post(url, data=payload, timeout=15)
+        payload = {"key": IMGBB_API_KEY}
+        
+        # 關鍵修復：將指標歸零，並改用二進位 (binary) 檔案格式直接上傳，徹底避開 Base64 長度超載問題
+        buf.seek(0)
+        files = {"image": ('chart.png', buf.getvalue(), 'image/png')}
+        
+        # 發送 Multipart/form-data 請求
+        res = requests.post(url, data=payload, files=files, timeout=20)
         
         if res.status_code == 200:
-            return res.json()['data']['url'], ""
+            image_url = res.json()['data']['url']
+            print(f"✅ 圖片上傳 ImgBB 成功！網址：{image_url}", flush=True)
+            # 若您的其他函式是接收單一網址，請回傳 image_url；若接收 Tuple 請自行調整
+            return image_url
         else:
-            return None, f"❌ ImgBB 上傳失敗 (狀態碼 {res.status_code})"
+            # 將 ImgBB 官方的真實報錯訊息抓出來
+            err_detail = res.json().get('error', {}).get('message', '未知錯誤')
+            print(f"❌ ImgBB 上傳失敗 (狀態碼 400): {err_detail}", flush=True)
+            return None
+            
     except Exception as e:
-        return None, f"❌ 圖片上傳過程出錯：{str(e)}"
+        print(f"❌ 圖片上傳過程發生未預期錯誤：{str(e)}", flush=True)
+        return None
     
 def calc_ylim(series):
     s_min, s_max = series.min(), series.max()
