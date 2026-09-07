@@ -105,22 +105,27 @@ def get_holding_shares_info(stock_id):
 
 def upload_imgbb(buf):
     try:
-        # 確保雲端主機上有 static 資料夾
-        os.makedirs('static', exist_ok=True)
-        
-        # 將圖片存到 Render 雲端主機的硬碟中
-        filepath = 'static/chart.png'
-        with open(filepath, 'wb') as f:
-            f.write(buf.getvalue())
+        if not IMGBB_API_KEY:
+            print("❌ 找不到 IMGBB_API_KEY")
+            return None
             
-        # 自動產生 Render 雲端網站的公開網址（加上時間戳記防 LINE 快取舊圖）
-        base_url = request.host_url.replace('http://', 'https://')
-        image_url = f"{base_url}static/chart.png?v={int(time.time())}"
+        url = "https://api.imgbb.com/1/upload"
+        payload = {
+            "key": IMGBB_API_KEY,
+            "image": base64.b64encode(buf.getvalue()).decode('utf-8')
+        }
+        res = requests.post(url, data=payload, timeout=10)
         
-        print(f"✅ 圖片已成功存入雲端，網址：{image_url}", flush=True)
-        return image_url
+        if res.status_code == 200:
+            image_url = res.json()['data']['url']
+            print(f"✅ 圖片已成功存入 ImgBB，網址：{image_url}", flush=True)
+            return image_url
+        else:
+            print(f"❌ ImgBB 上傳失敗，狀態碼：{res.status_code}", flush=True)
+            return None
+            
     except Exception as e:
-        print(f"❌ 雲端存檔失敗：{e}", flush=True)
+        print(f"❌ 圖片上傳過程發生錯誤：{e}", flush=True)
         return None
     
 def calc_ylim(series):
