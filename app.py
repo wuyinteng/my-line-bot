@@ -4,7 +4,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage, QuickReply, QuickReplyButton, MessageAction
 import time
 import matplotlib
-matplotlib.use('Agg')  # 必須在 import pyplot 之前執行
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import yfinance as yf
 from FinMind.data import DataLoader
@@ -18,19 +18,19 @@ import io
 import traceback
 from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
-
 import warnings
-warnings.filterwarnings("ignore")
-
 import mplfinance as mpf
+
+warnings.filterwarnings("ignore")
 
 app = Flask(__name__)
 
 # ==========================================
-# 🔑 1. 金鑰改由雲端環境變數讀取
+# 🔑 1. 金鑰讀取 (加入預設值防呆)
 # ==========================================
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN")
-IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY")
+# 加入您原本的 ImgBB 備用金鑰，防止環境變數未設定導致圖片全滅
+IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "4bc61e9d363f21433c906beb7440dd92")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 MY_USER_ID = os.environ.get("MY_USER_ID")
@@ -54,8 +54,6 @@ except Exception as e:
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
-    
-    # 邏輯 A：台股判斷
     if msg.isdigit() and len(msg) >= 4:
         try:
             stock_name = tw_stock_dict.get(msg, "")
@@ -74,7 +72,6 @@ def get_quote(msg):
             print(f"台股報價錯誤：{e}", flush=True)
             return None
             
-    # 邏輯 B：美股判斷
     elif msg.isalpha() and 1 <= len(msg) <= 5:
         try:
             stock = yf.Ticker(msg)
@@ -91,7 +88,6 @@ def get_quote(msg):
         except Exception as e:
             print(f"美股報價錯誤：{e}", flush=True)
             return None
-            
     return None
 
 def get_holding_shares_info(stock_id):
@@ -100,7 +96,6 @@ def get_holding_shares_info(stock_id):
         url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, stream=True, timeout=10)
-        
         latest_date, big_percent, small_percent = "", 0.0, 0.0
         found_stock = False
         
@@ -129,7 +124,7 @@ def get_holding_shares_info(stock_id):
 def upload_imgbb(buf):
     try:
         if not IMGBB_API_KEY:
-            print("❌ 找不到 IMGBB_API_KEY")
+            print("❌ 找不到 IMGBB_API_KEY", flush=True)
             return None
             
         url = "https://api.imgbb.com/1/upload"
@@ -137,18 +132,15 @@ def upload_imgbb(buf):
             "key": IMGBB_API_KEY,
             "image": base64.b64encode(buf.getvalue()).decode('utf-8')
         }
-        res = requests.post(url, data=payload, timeout=10)
+        res = requests.post(url, data=payload, timeout=15)
         
         if res.status_code == 200:
-            image_url = res.json()['data']['url']
-            print(f"✅ 圖片已成功存入 ImgBB，網址：{image_url}", flush=True)
-            return image_url
+            return res.json()['data']['url']
         else:
             print(f"❌ ImgBB 上傳失敗，狀態碼：{res.status_code}", flush=True)
             return None
-            
     except Exception as e:
-        print(f"❌ 圖片上傳過程發生錯誤：{e}", flush=True)
+        print(f"❌ 圖片上傳錯誤：{e}", flush=True)
         return None
     
 def calc_ylim(series):
@@ -158,34 +150,49 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 3. 繪製三圖流 (K線、大戶散戶、外資投信融資)
+# 🎨 3. 繪製三圖流 (K線改採穩定 FinMind 資料來源)
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
-    stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
-    if chart_type == "走":
-        df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
-        if df.empty: return None
-        df = df.dropna(subset=['Close'])
-        if len(df) >= 2:
+    try:
+        if chart_type == "走":
+            stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
+            df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
+            if df.empty: return None
+            df = df.dropna(subset=['Close'])
+            if len(df) >= 2:
+                df.index = df.index.tz_localize(None)
+                df = df[df.index.date == df.index[-1].date()]
+            if df.empty: return None
+            mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
+            buf = io.BytesIO()
+            mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
+            return upload_imgbb(buf)
+
+        # Ｋ線圖改用 FinMind，徹底解決 yfinance 被擋的問題
+        if stock_id.isdigit():
+            start_date = (datetime.datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+            df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
+            if df.empty: return None
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            df.rename(columns={'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 'Trading_Volume': 'Volume'}, inplace=True)
+        else:
+            stock = yf.Ticker(stock_id)
+            df = stock.history(period='4mo')
+            if df.empty: return None
             df.index = df.index.tz_localize(None)
-            df = df[df.index.date == df.index[-1].date()]
-        if df.empty: return None
+
+        cutoff_date = df.index.max() - pd.DateOffset(months=3)
+        df = df[df.index >= cutoff_date].copy()
+        
         mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
         buf = io.BytesIO()
-        mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
+        mpf.plot(df, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
+                 title=f"{stock_id} 3M K-Line", figratio=(10, 7), tight_layout=True, savefig=buf)
         return upload_imgbb(buf)
-
-    df_full = stock.history(period='4mo')
-    if df_full.empty: return None
-    cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
-    df = df_full[df_full.index >= cutoff_date].copy()
-    df.index = df.index.tz_localize(None)
-    
-    mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
-    buf = io.BytesIO()
-    mpf.plot(df, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
-             title=f"{stock_id} 3M K-Line", figratio=(10, 7), tight_layout=True, savefig=buf)
-    return upload_imgbb(buf)
+    except Exception as e:
+        print(f"K線/走勢繪製錯誤：{e}", flush=True)
+        return None
 
 def generate_holders_chart(stock_id):
     if not stock_id.isdigit(): return None
@@ -315,7 +322,7 @@ def generate_inst_margin_chart(stock_id):
         plt.close(fig)
         return upload_imgbb(buf)
     except Exception as e: 
-        print(f"外資融資圖繪製錯誤：{e}")
+        print(f"外資融資圖繪製錯誤：{e}", flush=True)
         return None
 
 # ==========================================
@@ -431,7 +438,7 @@ def handle_message(event):
         requests.post(
             "https://api.line.me/v2/bot/chat/loading/start", 
             headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"}, 
-            json={"chatId": event.source.user_id, "loadingSeconds": 15}
+            json={"chatId": event.source.user_id, "loadingSeconds": 15} 
         )
     except Exception as e:
         print(f"Loading Animation Error: {e}")
@@ -475,7 +482,7 @@ def handle_message(event):
                     ImageSendMessage(original_content_url=url_trend, preview_image_url=url_trend)
                 ])
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片產生失敗。", quick_reply=qr_buttons))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片產生失敗，請確認代號是否正確。", quick_reply=qr_buttons))
         return
         
     result = get_quote(user_msg)
