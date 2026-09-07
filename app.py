@@ -50,10 +50,12 @@ except Exception as e:
     pass
 
 # ==========================================
-# 📈 2. 文字現況報告
+# 📈 2. 文字現況報告 (含台美股)
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
+    
+    # 邏輯 A：台股判斷
     if msg.isdigit() and len(msg) >= 4:
         try:
             stock_name = tw_stock_dict.get(msg, "")
@@ -61,14 +63,35 @@ def get_quote(msg):
             start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             df = dl.taiwan_stock_daily(stock_id=msg, start_date=start_date)
             
-            if df.empty: return f"找不到台股【{name_display}】資料"
+            if df.empty: return f"找不到台股【{name_display}】近期資料，可能是 API 限制或代碼錯誤。"
             if len(df) >= 2:
                 tc, to, pc = df['close'].iloc[-1], df['open'].iloc[-1], df['close'].iloc[-2]
                 dp, pp = tc - pc, (tc - pc) / pc * 100
                 sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
                 return (f"📊 【股票報價】{name_display}\n"
                         f"▪️ 成交價：{tc:.2f} TWD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
-        except: return None
+        except Exception as e:
+            print(f"台股報價錯誤：{e}", flush=True)
+            return None
+            
+    # 邏輯 B：美股判斷
+    elif msg.isalpha() and 1 <= len(msg) <= 5:
+        try:
+            stock = yf.Ticker(msg)
+            df = stock.history(period='5d')
+            if df.empty: return f"找不到美股代號【{msg}】"
+            if len(df) >= 2:
+                tc, to, pc = df['Close'].iloc[-1], df['Open'].iloc[-1], df['Close'].iloc[-2]
+                dp, pp = tc - pc, (tc - pc) / pc * 100
+                sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
+                try: comp_name = stock.info.get('shortName', msg)
+                except: comp_name = msg
+                return (f"📊 【美股報價】{comp_name} ({msg})\n"
+                        f"▪️ 成交價：{tc:.2f} USD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
+        except Exception as e:
+            print(f"美股報價錯誤：{e}", flush=True)
+            return None
+            
     return None
 
 def get_holding_shares_info(stock_id):
@@ -408,9 +431,10 @@ def handle_message(event):
         requests.post(
             "https://api.line.me/v2/bot/chat/loading/start", 
             headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"}, 
-            json={"chatId": event.source.sender_id, "loadingSeconds": 15}
+            json={"chatId": event.source.user_id, "loadingSeconds": 15}  # 修正：sender_id 改為 user_id
         )
-    except: pass
+    except Exception as e:
+        print(f"Loading Animation Error: {e}")
 
     btn_target = user_msg.replace("K", "").replace("走", "")
     if btn_target in ["四大指數", "美股指數", "美股四大指數", "INDEX"]: btn_target = "^DJI"
@@ -454,10 +478,12 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片產生失敗。", quick_reply=qr_buttons))
         return
         
+    # 修正：補上之前漏掉的 result 變數定義，並處理普通報價查詢
+    result = get_quote(user_msg)
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
     else:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確的台股代碼（例如：2330），或輸入 K2330 查看三圖流。", quick_reply=qr_buttons))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確的台股代碼（例如：2330），或美股代碼（例如：AAPL）。", quick_reply=qr_buttons))
 
 # ==========================================
 # ⏰ 6. 啟動伺服器與鬧鐘排程
