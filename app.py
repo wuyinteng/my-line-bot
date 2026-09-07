@@ -431,7 +431,7 @@ def handle_message(event):
         requests.post(
             "https://api.line.me/v2/bot/chat/loading/start", 
             headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"}, 
-            json={"chatId": event.source.user_id, "loadingSeconds": 15}  # 修正：sender_id 改為 user_id
+            json={"chatId": event.source.user_id, "loadingSeconds": 15}
         )
     except Exception as e:
         print(f"Loading Animation Error: {e}")
@@ -478,7 +478,6 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片產生失敗。", quick_reply=qr_buttons))
         return
         
-    # 修正：補上之前漏掉的 result 變數定義，並處理普通報價查詢
     result = get_quote(user_msg)
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
