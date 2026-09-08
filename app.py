@@ -14,7 +14,6 @@ import base64
 import io
 import traceback
 from bs4 import BeautifulSoup
-from io import StringIO
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import warnings
@@ -50,55 +49,7 @@ except Exception as e:
     pass
 
 # ==========================================
-# 🕷️ 2. 神秘金字塔爬蟲 (大戶散戶資料)
-# ==========================================
-def get_chip_from_pyramid(stock_id):
-    url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        dfs = pd.read_html(StringIO(res.text), header=None)
-        
-        target_df = None
-        for df in dfs:
-            head_str = "".join(df.head(3).astype(str).values.flatten())
-            if '日期' in head_str and '1000' in head_str:
-                target_df = df
-                break
-                
-        if target_df is None: return None
-            
-        date_col, big_col, retail_col = None, None, None
-        for c in target_df.columns:
-            col_text = "".join(target_df[c].head(3).astype(str).tolist())
-            if '日期' in col_text: date_col = c
-            if '1000' in col_text and '%' in col_text: big_col = c
-            if '10' in col_text and '100' not in col_text and '%' in col_text: retail_col = c
-
-        if date_col is None or big_col is None or retail_col is None: return None
-
-        clean_df = target_df[[date_col, big_col, retail_col]].copy()
-        clean_df.columns = ['Date', 'Big_Holder', 'Retail_Holder']
-        clean_df = clean_df.dropna()
-        
-        clean_df['Date'] = clean_df['Date'].astype(str).str.replace('/', '').str.replace('-', '').str.strip()
-        clean_df = clean_df[clean_df['Date'].str.startswith('20')] 
-        
-        clean_df['Big_Holder'] = pd.to_numeric(clean_df['Big_Holder'].astype(str).str.replace('%', ''), errors='coerce')
-        clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', ''), errors='coerce')
-        
-        clean_df['Date'] = pd.to_datetime(clean_df['Date'], format='%Y%m%d', errors='coerce')
-        clean_df = clean_df.dropna(subset=['Date']).sort_values('Date').set_index('Date')
-        clean_df.index = clean_df.index.normalize()
-        
-        return clean_df
-    except Exception as e:
-        print(f"神秘金字塔爬取失敗: {e}")
-        return None
-
-# ==========================================
-# 📈 3. 文字現況報告
+# 📈 2. 文字現況報告
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
@@ -175,7 +126,7 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 4. 圖表一：四層 K線圖 (含大戶與散戶多柱狀圖)
+# 🎨 3. 繪製精簡雙圖流 (整合大戶與散戶至 K 線副圖)
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
     try:
@@ -267,9 +218,6 @@ def generate_kline_vol_chart(stock_id, chart_type="K"):
         print(f"繪圖錯誤：{e}")
         return None
 
-# ==========================================
-# 📊 5. 圖表二：外資、投信、融資動向圖
-# ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
     try:
@@ -294,7 +242,6 @@ def generate_inst_margin_chart(stock_id):
                     df_margin[col] = 0
                 else:
                     df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
-            # 正確融資買賣超公式
             df_margin['margin_net'] = (df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell'] - df_margin['MarginPurchaseCashRepayment']) / 1000
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
@@ -343,7 +290,7 @@ def generate_inst_margin_chart(stock_id):
         return None
 
 # ==========================================
-# 🚀 6. 8:50 盤前戰情總匯引擎
+# 🚀 4. 8:50 盤前戰情總匯引擎
 # ==========================================
 def get_intraday_chart_url(ticker_symbol, title_name):
     try:
@@ -434,7 +381,7 @@ def morning_all_in_one_report():
         print(f"盤前總匯推播失敗: {e}")
 
 # ==========================================
-# 🌐 7. LINE Bot 路由與訊息處理
+# 🌐 5. LINE Bot 路由與訊息處理
 # ==========================================
 @app.route("/", methods=['GET'])
 def index():
@@ -503,7 +450,7 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
 
 # ==========================================
-# ⏰ 8. 啟動伺服器與鬧鐘排程
+# ⏰ 6. 啟動伺服器與鬧鐘排程
 # ==========================================
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone="Asia/Taipei")
