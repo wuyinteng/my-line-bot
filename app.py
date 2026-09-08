@@ -178,61 +178,94 @@ def calc_ylim(series):
 # 🎨 4. 圖表一：四層 K線圖 (含大戶與散戶多柱狀圖)
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
-    stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
-    if chart_type == "走":
-        df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
-        if df.empty: return None
-        df = df.dropna(subset=['Close'])
-        if len(df) >= 2:
-            df.index = df.index.tz_localize(None)
-            df = df[df.index.date == df.index[-1].date()]
-        if df.empty: return None
+    try:
+        stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
+        if chart_type == "走":
+            df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
+            if df.empty: return None
+            df = df.dropna(subset=['Close'])
+            if len(df) >= 2:
+                df.index = df.index.tz_localize(None)
+                df = df[df.index.date == df.index[-1].date()]
+            if df.empty: return None
+            mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
+            buf = io.BytesIO()
+            mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
+            return upload_imgbb(buf)
+
+        df_full = stock.history(period='4mo')
+        if df_full.empty: return None
+        cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
+        df_plot = df_full[df_full.index >= cutoff_date].copy()
+        df_plot.index = df_plot.index.tz_localize(None).normalize()
+
+        ap = []
+        if stock_id.isdigit():
+            try:
+                url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                res = requests.get(url, headers=headers, timeout=10)
+                res.encoding = 'utf-8'
+                soup = BeautifulSoup(res.text, 'html.parser')
+
+                target_table = None
+                for table in soup.find_all('table'):
+                    if '小於1張' in table.text and '1000張以上' in table.text:
+                        target_table = table
+                        break
+
+                parsed_data = []
+                if target_table:
+                    for tr in target_table.find_all('tr'):
+                        cols = [td.text.replace('\xa0', '').strip() for td in tr.find_all(['td', 'th'])]
+                        date_idx = -1
+                        for i, c in enumerate(cols):
+                            if c.startswith('20') and len(c) == 8 and c.isdigit():
+                                date_idx = i
+                                break
+                        if date_idx != -1 and len(cols) >= date_idx + 16:
+                            try:
+                                parsed_data.append({
+                                    'date': pd.to_datetime(cols[date_idx], format='%Y%m%d'),
+                                    'Big_Holder': float(cols[date_idx+15]),
+                                    'Retail_Holder': float(cols[date_idx+1]) + float(cols[date_idx+2]) + float(cols[date_idx+3])
+                                })
+                            except: continue
+
+                if parsed_data:
+                    target_df = pd.DataFrame(parsed_data).drop_duplicates(subset=['date'], keep='first').sort_values('date').tail(16).set_index('date')
+                    
+                    target_df['Big_Diff'] = target_df['Big_Holder'].diff()
+                    target_df['Retail_Diff'] = target_df['Retail_Holder'].diff()
+                    target_df['Big_Color'] = target_df['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
+                    target_df['Retail_Color'] = target_df['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
+
+                    df_plot = df_plot.join(target_df[['Big_Holder', 'Retail_Holder', 'Big_Color', 'Retail_Color']], how='left')
+                    df_plot['Big_Holder'] = df_plot['Big_Holder'].ffill().bfill()
+                    df_plot['Retail_Holder'] = df_plot['Retail_Holder'].ffill().bfill()
+                    df_plot['Big_Color'] = df_plot['Big_Color'].ffill().bfill()
+                    df_plot['Retail_Color'] = df_plot['Retail_Color'].ffill().bfill()
+
+                    if not df_plot['Big_Holder'].isna().all():
+                        ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(>1000)'))
+                        ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(<10)'))
+            except Exception as e:
+                pass
+
         mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
         buf = io.BytesIO()
-        mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
+
+        if ap:
+            mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
+                     title=f"{stock_id} 3M Chart", addplot=ap, panel_ratios=(4, 1.2, 1.5, 1.5), figratio=(10, 12), tight_layout=True, savefig=buf)
+        else:
+            mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
+                     title=f"{stock_id} 3M K-Line", figratio=(10, 7), tight_layout=True, savefig=buf)
+
         return upload_imgbb(buf)
-
-    df_full = stock.history(period='4mo')
-    if df_full.empty: return None
-    cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
-    df_plot = df_full[df_full.index >= cutoff_date].copy()
-    df_plot.index = df_plot.index.tz_localize(None).normalize()
-    
-    ap = []
-    
-    if stock_id.isdigit():
-        df_chip = get_chip_from_pyramid(stock_id)
-        if df_chip is not None and not df_chip.empty:
-            df_chip['Big_Diff'] = df_chip['Big_Holder'].diff()
-            df_chip['Retail_Diff'] = df_chip['Retail_Holder'].diff()
-            
-            df_chip['Big_Color'] = df_chip['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-            df_chip['Retail_Color'] = df_chip['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-
-            df_combined = pd.DataFrame(index=df_plot.index)
-            df_combined = df_combined.join(df_chip, how='left')
-            df_combined['Big_Holder'] = df_combined['Big_Holder'].ffill().bfill()
-            df_combined['Retail_Holder'] = df_combined['Retail_Holder'].ffill().bfill()
-            df_combined['Big_Color'] = df_combined['Big_Color'].ffill().bfill()
-            df_combined['Retail_Color'] = df_combined['Retail_Color'].ffill().bfill()
-
-            df_plot['Big_Holder'] = df_combined['Big_Holder']
-            df_plot['Retail_Holder'] = df_combined['Retail_Holder']
-            df_plot['Big_Color'] = df_combined['Big_Color']
-            df_plot['Retail_Color'] = df_combined['Retail_Color']
-
-            if not df_plot['Big_Holder'].isna().all():
-                ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(%)'))
-                ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(%)'))
-    
-    mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
-    buf = io.BytesIO()
-    
-    title_str = f"{stock_id} 3M Chart"
-    panel_ratios = (4, 1.2, 1.5, 1.5) if ap else (4, 1)
-    mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
-             title=title_str, addplot=ap, panel_ratios=panel_ratios, figratio=(10, 13), savefig=buf)
-    return upload_imgbb(buf)
+    except Exception as e:
+        print(f"繪圖錯誤：{e}")
+        return None
 
 # ==========================================
 # 📊 5. 圖表二：外資、投信、融資動向圖
