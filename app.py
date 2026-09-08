@@ -10,11 +10,10 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSend
 app = Flask(__name__)
 
 # ==========================================
-# 🔑 金鑰設定 (使用您成功申請的 ImgBB Key)
+# 🔑 金鑰設定 (請確保雲端環境變數已設定)
 # ==========================================
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "請確保雲端有設定此變數")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "請確保雲端有設定此變數")
-IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -43,6 +42,31 @@ def upload_imgbb(buf):
         print(f"❌ 圖片上傳發生未預期錯誤：{str(e)}", flush=True)
         return None, f"上傳錯誤: {str(e)}"
 
+# ==========================================
+# 🎨 測試用繪圖引擎
+# ==========================================
+def test_draw_and_upload():
+    try:
+        # 隨便畫一條紅色的折線圖來測試
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot([1, 2, 3, 4], [10, 20, 25, 30], marker='o', color='red', linewidth=2)
+        ax.set_title("LINE Bot Image Test Successful!")
+        ax.grid(True, alpha=0.3)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        plt.close(fig)
+
+        # 呼叫上傳函式
+        url, err = upload_imgbb(buf)
+        return url
+    except Exception as e:
+        print(f"測試繪圖發生錯誤：{e}", flush=True)
+        return None
+
+# ==========================================
+# 🌐 LINE Bot 路由與訊息處理
+# ==========================================
 @app.route("/", methods=['GET'])
 def index():
     return "LINE Bot is running!"
