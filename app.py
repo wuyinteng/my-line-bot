@@ -14,6 +14,7 @@ import base64
 import io
 import traceback
 from bs4 import BeautifulSoup
+from io import StringIO
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import warnings
@@ -49,7 +50,56 @@ except Exception as e:
     pass
 
 # ==========================================
-# 📈 2. 文字現況報告
+# 🕷️ 2. 神秘金字塔爬蟲 (抓取近 3 個月約 12 筆大戶/散戶歷史資料)
+# ==========================================
+def get_chip_from_pyramid(stock_id):
+    url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.encoding = 'utf-8'
+        dfs = pd.read_html(StringIO(res.text), header=None)
+        
+        target_df = None
+        for df in dfs:
+            head_str = "".join(df.head(3).astype(str).values.flatten())
+            if '日期' in head_str and '1000' in head_str:
+                target_df = df
+                break
+                
+        if target_df is None: return None
+            
+        date_col, big_col, retail_col = None, None, None
+        for c in target_df.columns:
+            col_text = "".join(target_df[c].head(3).astype(str).tolist())
+            if '日期' in col_text: date_col = c
+            if '1000' in col_text and '%' in col_text: big_col = c
+            if '10' in col_text and '100' not in col_text and '%' in col_text: retail_col = c
+
+        if date_col is None or big_col is None or retail_col is None: return None
+
+        clean_df = target_df[[date_col, big_col, retail_col]].copy()
+        clean_df.columns = ['Date', 'Big_Holder', 'Retail_Holder']
+        clean_df = clean_df.dropna()
+        
+        clean_df['Date'] = clean_df['Date'].astype(str).str.replace('/', '').str.replace('-', '').str.strip()
+        clean_df = clean_df[clean_df['Date'].str.startswith('20')] 
+        
+        clean_df['Big_Holder'] = pd.to_numeric(clean_df['Big_Holder'].astype(str).str.replace('%', ''), errors='coerce')
+        clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', ''), errors='coerce')
+        
+        clean_df['Date'] = pd.to_datetime(clean_df['Date'], format='%Y%m%d', errors='coerce')
+        # 取最後 12 筆（約 3 個月週資料）
+        clean_df = clean_df.dropna(subset=['Date']).sort_values('Date').tail(12).set_index('Date')
+        clean_df.index = clean_df.index.normalize()
+        
+        return clean_df
+    except Exception as e:
+        print(f"神秘金字塔爬取失敗: {e}")
+        return None
+
+# ==========================================
+# 📈 3. 文字現況報告
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
@@ -126,98 +176,68 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 3. 繪製精簡雙圖流 (整合大戶與散戶至 K 線副圖)
+# 🎨 4. 圖表一：四層 K線圖 (含神秘金字塔大戶/散戶多柱狀圖)
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
-    try:
-        stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
-        if chart_type == "走":
-            df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
-            if df.empty: return None
-            df = df.dropna(subset=['Close'])
-            if len(df) >= 2:
-                df.index = df.index.tz_localize(None)
-                df = df[df.index.date == df.index[-1].date()]
-            if df.empty: return None
-            mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
-            buf = io.BytesIO()
-            mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
-            return upload_imgbb(buf)
-
-        df_full = stock.history(period='4mo')
-        if df_full.empty: return None
-        cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
-        df_plot = df_full[df_full.index >= cutoff_date].copy()
-        df_plot.index = df_plot.index.tz_localize(None).normalize()
-
-        ap = []
-        if stock_id.isdigit():
-            try:
-                url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                res = requests.get(url, headers=headers, timeout=10)
-                res.encoding = 'utf-8'
-                soup = BeautifulSoup(res.text, 'html.parser')
-
-                target_table = None
-                for table in soup.find_all('table'):
-                    if '小於1張' in table.text and '1000張以上' in table.text:
-                        target_table = table
-                        break
-
-                parsed_data = []
-                if target_table:
-                    for tr in target_table.find_all('tr'):
-                        cols = [td.text.replace('\xa0', '').strip() for td in tr.find_all(['td', 'th'])]
-                        date_idx = -1
-                        for i, c in enumerate(cols):
-                            if c.startswith('20') and len(c) == 8 and c.isdigit():
-                                date_idx = i
-                                break
-                        if date_idx != -1 and len(cols) >= date_idx + 16:
-                            try:
-                                parsed_data.append({
-                                    'date': pd.to_datetime(cols[date_idx], format='%Y%m%d'),
-                                    'Big_Holder': float(cols[date_idx+15]),
-                                    'Retail_Holder': float(cols[date_idx+1]) + float(cols[date_idx+2]) + float(cols[date_idx+3])
-                                })
-                            except: continue
-
-                if parsed_data:
-                    target_df = pd.DataFrame(parsed_data).drop_duplicates(subset=['date'], keep='first').sort_values('date').tail(16).set_index('date')
-                    
-                    target_df['Big_Diff'] = target_df['Big_Holder'].diff()
-                    target_df['Retail_Diff'] = target_df['Retail_Holder'].diff()
-                    target_df['Big_Color'] = target_df['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-                    target_df['Retail_Color'] = target_df['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-
-                    df_plot = df_plot.join(target_df[['Big_Holder', 'Retail_Holder', 'Big_Color', 'Retail_Color']], how='left')
-                    df_plot['Big_Holder'] = df_plot['Big_Holder'].ffill().bfill()
-                    df_plot['Retail_Holder'] = df_plot['Retail_Holder'].ffill().bfill()
-                    df_plot['Big_Color'] = df_plot['Big_Color'].ffill().bfill()
-                    df_plot['Retail_Color'] = df_plot['Retail_Color'].ffill().bfill()
-
-                    if not df_plot['Big_Holder'].isna().all():
-                        ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(>1000)'))
-                        ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(<10)'))
-            except Exception as e:
-                pass
-
+    stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
+    if chart_type == "走":
+        df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
+        if df.empty: return None
+        df = df.dropna(subset=['Close'])
+        if len(df) >= 2:
+            df.index = df.index.tz_localize(None)
+            df = df[df.index.date == df.index[-1].date()]
+        if df.empty: return None
         mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
         buf = io.BytesIO()
-
-        if ap:
-            mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
-                     title=f"{stock_id} 3M Chart", addplot=ap, panel_ratios=(4, 1.2, 1.5, 1.5), figratio=(10, 12), tight_layout=True, savefig=buf)
-        else:
-            mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
-                     title=f"{stock_id} 3M K-Line", figratio=(10, 7), tight_layout=True, savefig=buf)
-
+        mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
         return upload_imgbb(buf)
-    except Exception as e:
-        print(f"繪圖錯誤：{e}")
-        return None
 
+    df_full = stock.history(period='4mo')
+    if df_full.empty: return None
+    cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
+    df_plot = df_full[df_full.index >= cutoff_date].copy()
+    df_plot.index = df_plot.index.tz_localize(None).normalize()
+    
+    ap = []
+    
+    if stock_id.isdigit():
+        df_chip = get_chip_from_pyramid(stock_id)
+        if df_chip is not None and not df_chip.empty:
+            df_chip['Big_Diff'] = df_chip['Big_Holder'].diff()
+            df_chip['Retail_Diff'] = df_chip['Retail_Holder'].diff()
+            
+            df_chip['Big_Color'] = df_chip['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
+            df_chip['Retail_Color'] = df_chip['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
+
+            df_combined = pd.DataFrame(index=df_plot.index)
+            df_combined = df_combined.join(df_chip, how='left')
+            df_combined['Big_Holder'] = df_combined['Big_Holder'].ffill().bfill()
+            df_combined['Retail_Holder'] = df_combined['Retail_Holder'].ffill().bfill()
+            df_combined['Big_Color'] = df_combined['Big_Color'].ffill().bfill()
+            df_combined['Retail_Color'] = df_combined['Retail_Color'].ffill().bfill()
+
+            df_plot['Big_Holder'] = df_combined['Big_Holder']
+            df_plot['Retail_Holder'] = df_combined['Retail_Holder']
+            df_plot['Big_Color'] = df_combined['Big_Color']
+            df_plot['Retail_Color'] = df_combined['Retail_Color']
+
+            if not df_plot['Big_Holder'].isna().all():
+                ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(%)'))
+                ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(%)'))
+    
+    mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
+    buf = io.BytesIO()
+    
+    title_str = f"{stock_id} 3M Chart"
+    panel_ratios = (4, 1.2, 1.5, 1.5) if ap else (4, 1)
+    mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
+             title=title_str, addplot=ap, panel_ratios=panel_ratios, figratio=(10, 13), savefig=buf)
+    return upload_imgbb(buf)
+
+# ==========================================
+# 📊 5. 圖表二：外資、投信、融資動向圖 (融資單位調整為 1000)
+# ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
     try:
@@ -227,7 +247,6 @@ def generate_inst_margin_chart(stock_id):
         
         if df_inst.empty and df_margin.empty: return None
         
-        # --- 處理外資與投信 (單位：股 -> 轉換為張) ---
         df_inst['date'] = pd.to_datetime(df_inst['date'])
         df_inst['buy'] = pd.to_numeric(df_inst['buy'], errors='coerce').fillna(0)
         df_inst['sell'] = pd.to_numeric(df_inst['sell'], errors='coerce').fillna(0)
@@ -236,17 +255,18 @@ def generate_inst_margin_chart(stock_id):
         df_foreign = df_inst[df_inst['name'].str.contains('外資|外陸|Foreign', na=False, case=False)].groupby('date')['net'].sum().reset_index()
         df_trust = df_inst[df_inst['name'].str.contains('投信|Trust', na=False, case=False)].groupby('date')['net'].sum().reset_index()
         
-        # --- 處理融資買賣超 (單位原本就是張，移除 / 1000) ---
         if not df_margin.empty:
             df_margin['date'] = pd.to_datetime(df_margin['date'])
-            df_margin['MarginPurchaseBuy'] = pd.to_numeric(df_margin['MarginPurchaseBuy'], errors='coerce').fillna(0)
-            df_margin['MarginPurchaseSell'] = pd.to_numeric(df_margin['MarginPurchaseSell'], errors='coerce').fillna(0)
-            # 🌟 關鍵修正：單位已是「張」，直接相減即可
-            df_margin['margin_net'] = df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell']
+            for col in ['MarginPurchaseBuy', 'MarginPurchaseSell', 'MarginPurchaseCashRepayment']:
+                if col not in df_margin.columns:
+                    df_margin[col] = 0
+                else:
+                    df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
+            # 融資淨買賣超換算為「張」(除以 1000)
+            df_margin['margin_net'] = (df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell'] - df_margin['MarginPurchaseCashRepayment']) / 1000
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
         
-        # --- 合併與對齊日期 ---
         dates = sorted(list(set(df_foreign['date'].tolist() + df_trust['date'].tolist() + df_margin['date'].tolist())))
         df_plot = pd.DataFrame({'date': dates})
         df_plot = pd.merge(df_plot, df_foreign.rename(columns={'net': 'Foreign'}), on='date', how='left')
@@ -256,7 +276,6 @@ def generate_inst_margin_chart(stock_id):
         df_plot.fillna(0, inplace=True)
         df_plot = df_plot.tail(60) 
         
-        # --- 開始繪製三層圖表 ---
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 7), sharex=True)
         x_labels = df_plot['date'].dt.strftime('%m-%d')
         x_pos = range(len(df_plot))
@@ -292,7 +311,7 @@ def generate_inst_margin_chart(stock_id):
         return None
 
 # ==========================================
-# 🚀 4. 8:50 盤前戰情總匯引擎
+# 🚀 6. 8:50 盤前戰情總匯引擎
 # ==========================================
 def get_intraday_chart_url(ticker_symbol, title_name):
     try:
@@ -383,7 +402,7 @@ def morning_all_in_one_report():
         print(f"盤前總匯推播失敗: {e}")
 
 # ==========================================
-# 🌐 5. LINE Bot 路由與訊息處理
+# 🌐 7. LINE Bot 路由與訊息處理
 # ==========================================
 @app.route("/", methods=['GET'])
 def index():
@@ -452,7 +471,7 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
 
 # ==========================================
-# ⏰ 6. 啟動伺服器與鬧鐘排程
+# ⏰ 8. 啟動伺服器與鬧鐘排程
 # ==========================================
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone="Asia/Taipei")
