@@ -31,6 +31,7 @@ app = Flask(__name__)
 # 🔑 1. 金鑰與初始化設定
 # ==========================================
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoid3V5aW50ZW5nIiwiZW1haWwiOiJ3dXlpbnRlbmcxMjA2QGdtYWlsLmNvbSJ9.3-HFSvEh15UnzB4Nt_TZUYLCF7OSjrDuB31fwZ1foJA")
+IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "4bc61e9d363f21433c906beb7440dd92")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "8g/5K/9WQ7EiuEm16BBJ/aOjy7beli9UQS1oKoX3Jswq1iGuYxvlvT+OLpWO4ZTjRWscQlvRknxmtdioggR+rILSsd28GBtd1lbDcvPgv1VEE6yzdGScPxD/Evstgxtd6+lFTohe+R5lBjVi/+fqpQdB04t89/1O/w1cDnyilFU=")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "6394456d4596cc6aadb9c92dda96b296")
 MY_USER_ID = os.environ.get("MY_USER_ID", "請替換成您的_USER_ID")
@@ -50,7 +51,7 @@ except Exception as e:
     pass
 
 # ==========================================
-# 🕷️ 2. 神秘金字塔爬蟲 (抓取近 3 個月約 12 筆大戶/散戶歷史資料)
+# 🕷️ 2. 神秘金字塔爬蟲 (大戶散戶資料)
 # ==========================================
 def get_chip_from_pyramid(stock_id):
     url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
@@ -89,8 +90,7 @@ def get_chip_from_pyramid(stock_id):
         clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', ''), errors='coerce')
         
         clean_df['Date'] = pd.to_datetime(clean_df['Date'], format='%Y%m%d', errors='coerce')
-        # 取最後 12 筆（約 3 個月週資料）
-        clean_df = clean_df.dropna(subset=['Date']).sort_values('Date').tail(12).set_index('Date')
+        clean_df = clean_df.dropna(subset=['Date']).sort_values('Date').set_index('Date')
         clean_df.index = clean_df.index.normalize()
         
         return clean_df
@@ -99,7 +99,7 @@ def get_chip_from_pyramid(stock_id):
         return None
 
 # ==========================================
-# 📈 3. 文字現況報告
+# 📈 3. 文字現況報告 (含台美股)
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
@@ -110,14 +110,30 @@ def get_quote(msg):
             start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             df = dl.taiwan_stock_daily(stock_id=msg, start_date=start_date)
             
-            if df.empty: return f"找不到台股【{name_display}】資料"
+            if df.empty: return f"找不到台股【{name_display}】近期資料，可能是 API 限制或代碼錯誤。"
             if len(df) >= 2:
                 tc, to, pc = df['close'].iloc[-1], df['open'].iloc[-1], df['close'].iloc[-2]
                 dp, pp = tc - pc, (tc - pc) / pc * 100
                 sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
                 return (f"📊 【股票報價】{name_display}\n"
                         f"▪️ 成交價：{tc:.2f} TWD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
-        except: return None
+        except:
+            return None
+    elif msg.isalpha() and 1 <= len(msg) <= 5:
+        try:
+            stock = yf.Ticker(msg)
+            df = stock.history(period='5d')
+            if df.empty: return f"找不到美股代號【{msg}】"
+            if len(df) >= 2:
+                tc, pc = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                dp, pp = tc - pc, (tc - pc) / pc * 100
+                sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
+                try: comp_name = stock.info.get('shortName', msg)
+                except: comp_name = msg
+                return (f"📊 【美股報價】{comp_name} ({msg})\n"
+                        f"▪️ 成交價：{tc:.2f} USD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
+        except:
+            return None
     return None
 
 def get_holding_shares_info(stock_id):
@@ -154,16 +170,14 @@ def get_holding_shares_info(stock_id):
 
 def upload_imgbb(buf):
     try:
-        url = "https://freeimage.host/api/1/upload"
-        payload = {"key": "6d207e02198a847aa98d0a2a901485a5"} 
-        buf.seek(0)
-        files = {"source": ('chart.png', buf.getvalue(), 'image/png')}
+        if not IMGBB_API_KEY: return None
+        url = "https://api.imgbb.com/1/upload"
+        payload = {"key": IMGBB_API_KEY, "image": base64.b64encode(buf.getvalue()).decode('utf-8')}
+        res = requests.post(url, data=payload, timeout=15)
         
-        res = requests.post(url, data=payload, files=files, timeout=20)
         if res.status_code == 200:
-            return res.json()['image']['url']
+            return res.json()['data']['url']
         else:
-            print(f"❌ 圖床上傳失敗: {res.text}", flush=True)
             return None
     except Exception as e:
         print(f"❌ 圖片上傳錯誤：{e}", flush=True)
@@ -176,67 +190,74 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 4. 圖表一：四層 K線圖 (含神秘金字塔大戶/散戶多柱狀圖)
+# 🎨 4. 圖表一：四層 K線圖 (含大戶與散戶多柱狀圖)
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
-    stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
-    if chart_type == "走":
-        df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
-        if df.empty: return None
-        df = df.dropna(subset=['Close'])
-        if len(df) >= 2:
-            df.index = df.index.tz_localize(None)
-            df = df[df.index.date == df.index[-1].date()]
-        if df.empty: return None
+    try:
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        
+        stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id, session=session)
+        if chart_type == "走":
+            df = stock.history(period="5d", interval="5m" if stock_id.isdigit() else "1m")
+            if df.empty: return None
+            df = df.dropna(subset=['Close'])
+            if len(df) >= 2:
+                df.index = df.index.tz_localize(None)
+                df = df[df.index.date == df.index[-1].date()]
+            if df.empty: return None
+            mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
+            buf = io.BytesIO()
+            mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
+            return upload_imgbb(buf)
+
+        df_full = stock.history(period='4mo')
+        if df_full.empty: return None
+        cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
+        df_plot = df_full[df_full.index >= cutoff_date].copy()
+        df_plot.index = df_plot.index.tz_localize(None).normalize()
+        
+        ap = []
+        
+        if stock_id.isdigit():
+            df_chip = get_chip_from_pyramid(stock_id)
+            if df_chip is not None and not df_chip.empty:
+                df_chip['Big_Diff'] = df_chip['Big_Holder'].diff()
+                df_chip['Retail_Diff'] = df_chip['Retail_Holder'].diff()
+                
+                df_chip['Big_Color'] = df_chip['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
+                df_chip['Retail_Color'] = df_chip['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
+
+                df_combined = pd.DataFrame(index=df_plot.index)
+                df_combined = df_combined.join(df_chip, how='left')
+                df_combined['Big_Holder'] = df_combined['Big_Holder'].ffill().bfill()
+                df_combined['Retail_Holder'] = df_combined['Retail_Holder'].ffill().bfill()
+                df_combined['Big_Color'] = df_combined['Big_Color'].ffill().bfill()
+                df_combined['Retail_Color'] = df_combined['Retail_Color'].ffill().bfill()
+
+                df_plot['Big_Holder'] = df_combined['Big_Holder']
+                df_plot['Retail_Holder'] = df_combined['Retail_Holder']
+                df_plot['Big_Color'] = df_combined['Big_Color']
+                df_plot['Retail_Color'] = df_combined['Retail_Color']
+
+                if not df_plot['Big_Holder'].isna().all():
+                    ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(%)'))
+                    ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(%)'))
+        
         mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
         buf = io.BytesIO()
-        mpf.plot(df, type='line', volume=False, style=mpf.make_mpf_style(marketcolors=mc), title=f"{stock_id} Intraday", tight_layout=True, savefig=buf)
+        
+        title_str = f"{stock_id} 3M Chart"
+        panel_ratios = (4, 1.2, 1.5, 1.5) if ap else (4, 1)
+        mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
+                 title=title_str, addplot=ap, panel_ratios=panel_ratios, figratio=(10, 13), savefig=buf)
         return upload_imgbb(buf)
-
-    df_full = stock.history(period='4mo')
-    if df_full.empty: return None
-    cutoff_date = df_full.index.max() - pd.DateOffset(months=3)
-    df_plot = df_full[df_full.index >= cutoff_date].copy()
-    df_plot.index = df_plot.index.tz_localize(None).normalize()
-    
-    ap = []
-    
-    if stock_id.isdigit():
-        df_chip = get_chip_from_pyramid(stock_id)
-        if df_chip is not None and not df_chip.empty:
-            df_chip['Big_Diff'] = df_chip['Big_Holder'].diff()
-            df_chip['Retail_Diff'] = df_chip['Retail_Holder'].diff()
-            
-            df_chip['Big_Color'] = df_chip['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-            df_chip['Retail_Color'] = df_chip['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-
-            df_combined = pd.DataFrame(index=df_plot.index)
-            df_combined = df_combined.join(df_chip, how='left')
-            df_combined['Big_Holder'] = df_combined['Big_Holder'].ffill().bfill()
-            df_combined['Retail_Holder'] = df_combined['Retail_Holder'].ffill().bfill()
-            df_combined['Big_Color'] = df_combined['Big_Color'].ffill().bfill()
-            df_combined['Retail_Color'] = df_combined['Retail_Color'].ffill().bfill()
-
-            df_plot['Big_Holder'] = df_combined['Big_Holder']
-            df_plot['Retail_Holder'] = df_combined['Retail_Holder']
-            df_plot['Big_Color'] = df_combined['Big_Color']
-            df_plot['Retail_Color'] = df_combined['Retail_Color']
-
-            if not df_plot['Big_Holder'].isna().all():
-                ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(%)'))
-                ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(%)'))
-    
-    mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
-    buf = io.BytesIO()
-    
-    title_str = f"{stock_id} 3M Chart"
-    panel_ratios = (4, 1.2, 1.5, 1.5) if ap else (4, 1)
-    mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
-             title=title_str, addplot=ap, panel_ratios=panel_ratios, figratio=(10, 13), savefig=buf)
-    return upload_imgbb(buf)
+    except Exception as e:
+        print(f"K線繪圖錯誤: {e}", flush=True)
+        return None
 
 # ==========================================
-# 📊 5. 圖表二：外資、投信、融資動向圖 (融資單位調整為 1000)
+# 📊 5. 圖表二：外資、投信、融資動向圖 (單位: 張)
 # ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
@@ -262,7 +283,6 @@ def generate_inst_margin_chart(stock_id):
                     df_margin[col] = 0
                 else:
                     df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
-            # 融資淨買賣超換算為「張」(除以 1000)
             df_margin['margin_net'] = (df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell'] - df_margin['MarginPurchaseCashRepayment']) / 1000
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
@@ -444,7 +464,7 @@ def handle_message(event):
         if chart_type == "K":
             quote_text = get_quote(stock_id) or f"查詢【{stock_name}】..."
             holding_info = get_holding_shares_info(stock_id)
-            reply_text = f"✅ 【{stock_name}】雙圖流分析完成！\n\n{quote_text}{holding_info}"
+            reply_text = f"✅ 【{stock_name}】圖表分析完成！\n\n{quote_text}{holding_info}"
             
             messages_to_send = [TextSendMessage(text=reply_text, quick_reply=qr_buttons)]
             
