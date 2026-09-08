@@ -227,6 +227,7 @@ def generate_inst_margin_chart(stock_id):
         
         if df_inst.empty and df_margin.empty: return None
         
+        # --- 處理外資與投信 (單位：股 -> 轉換為張) ---
         df_inst['date'] = pd.to_datetime(df_inst['date'])
         df_inst['buy'] = pd.to_numeric(df_inst['buy'], errors='coerce').fillna(0)
         df_inst['sell'] = pd.to_numeric(df_inst['sell'], errors='coerce').fillna(0)
@@ -235,17 +236,17 @@ def generate_inst_margin_chart(stock_id):
         df_foreign = df_inst[df_inst['name'].str.contains('外資|外陸|Foreign', na=False, case=False)].groupby('date')['net'].sum().reset_index()
         df_trust = df_inst[df_inst['name'].str.contains('投信|Trust', na=False, case=False)].groupby('date')['net'].sum().reset_index()
         
+        # --- 處理融資買賣超 (單位原本就是張，移除 / 1000) ---
         if not df_margin.empty:
             df_margin['date'] = pd.to_datetime(df_margin['date'])
-            for col in ['MarginPurchaseBuy', 'MarginPurchaseSell', 'MarginPurchaseCashRepayment']:
-                if col not in df_margin.columns:
-                    df_margin[col] = 0
-                else:
-                    df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
-            df_margin['margin_net'] = (df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell'] - df_margin['MarginPurchaseCashRepayment']) / 1000
+            df_margin['MarginPurchaseBuy'] = pd.to_numeric(df_margin['MarginPurchaseBuy'], errors='coerce').fillna(0)
+            df_margin['MarginPurchaseSell'] = pd.to_numeric(df_margin['MarginPurchaseSell'], errors='coerce').fillna(0)
+            # 🌟 關鍵修正：單位已是「張」，直接相減即可
+            df_margin['margin_net'] = df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell']
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
         
+        # --- 合併與對齊日期 ---
         dates = sorted(list(set(df_foreign['date'].tolist() + df_trust['date'].tolist() + df_margin['date'].tolist())))
         df_plot = pd.DataFrame({'date': dates})
         df_plot = pd.merge(df_plot, df_foreign.rename(columns={'net': 'Foreign'}), on='date', how='left')
@@ -255,6 +256,7 @@ def generate_inst_margin_chart(stock_id):
         df_plot.fillna(0, inplace=True)
         df_plot = df_plot.tail(60) 
         
+        # --- 開始繪製三層圖表 ---
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 7), sharex=True)
         x_labels = df_plot['date'].dt.strftime('%m-%d')
         x_pos = range(len(df_plot))
