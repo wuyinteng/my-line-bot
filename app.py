@@ -14,7 +14,7 @@ app = Flask(__name__)
 # ==========================================
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "請確保雲端有設定此變數")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "請確保雲端有設定此變數")
-IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "4bc61e9d363f21433c906beb7440dd92")
+IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
