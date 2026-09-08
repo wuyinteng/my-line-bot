@@ -19,33 +19,29 @@ IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def test_draw_and_upload():
-    """只畫一條最簡單的紅色折線，測試 ImgBB 上傳是否暢通"""
+def upload_imgbb(buf):
     try:
-        # 1. 畫一張極簡測試圖
-        plt.figure(figsize=(4, 3))
-        plt.plot([1, 2, 3], [10, 20, 15], color='red', marker='o')
-        plt.title("ImgBB Connection Test")
+        # 改用 Freeimage.host 免費公開 API (免去 ImgBB 封鎖煩惱)
+        url = "https://freeimage.host/api/1/upload"
+        payload = {"key": "6d207e02198a847aa98d0a2a901485a5"} # 官方公開測試金鑰
         
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        plt.close()
-        
-        # 2. 以二進位傳送至 ImgBB
         buf.seek(0)
-        files = {"image": ('test.png', buf.getvalue(), 'image/png')}
-        res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY}, files=files, timeout=15)
+        # 注意：這家的參數名稱叫做 source
+        files = {"source": ('chart.png', buf.getvalue(), 'image/png')}
+        
+        res = requests.post(url, data=payload, files=files, timeout=20)
         
         if res.status_code == 200:
-            url = res.json()['data']['url']
-            print(f"✅ 上傳成功：{url}", flush=True)
-            return url
+            image_url = res.json()['image']['url']
+            print(f"✅ 圖片上傳備用圖床成功！網址：{image_url}", flush=True)
+            return image_url, ""
         else:
-            print(f"❌ 上傳失敗：{res.text}", flush=True)
-            return None
+            print(f"❌ 備用圖床上傳失敗: {res.text}", flush=True)
+            return None, f"圖床拒絕: {res.status_code}"
+            
     except Exception as e:
-        print(f"❌ 發生錯誤：{e}", flush=True)
-        return None
+        print(f"❌ 圖片上傳發生未預期錯誤：{str(e)}", flush=True)
+        return None, f"上傳錯誤: {str(e)}"
 
 @app.route("/", methods=['GET'])
 def index():
