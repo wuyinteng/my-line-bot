@@ -8,12 +8,11 @@ from FinMind.data import DataLoader
 import datetime
 from datetime import timedelta
 import pandas as pd
+import numpy as np
 import os
 import requests
-import base64
 import io
 import traceback
-from bs4 import BeautifulSoup
 from io import StringIO
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -89,6 +88,10 @@ def get_chip_from_pyramid(stock_id):
         clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', ''), errors='coerce')
         
         clean_df['Date'] = pd.to_datetime(clean_df['Date'], format='%Y%m%d', errors='coerce')
+        
+        # 校正週末日期至週五，避免與交易日錯開
+        clean_df['Date'] = clean_df['Date'].apply(lambda d: d - pd.Timedelta(days=d.weekday() - 4) if d.weekday() > 4 else d)
+        
         # 取最後 12 筆（約 3 個月週資料）
         clean_df = clean_df.dropna(subset=['Date']).sort_values('Date').tail(12).set_index('Date')
         clean_df.index = clean_df.index.normalize()
@@ -163,10 +166,8 @@ def upload_imgbb(buf):
         if res.status_code == 200:
             return res.json()['image']['url']
         else:
-            print(f"❌ 圖床上傳失敗: {res.text}", flush=True)
             return None
     except Exception as e:
-        print(f"❌ 圖片上傳錯誤：{e}", flush=True)
         return None
 
 def calc_ylim(series):
@@ -176,7 +177,7 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 4. 圖表一：四層 K線圖 (含神秘金字塔大戶/散戶多柱狀圖)
+# 🎨 4. 圖表一：純淨版 K線與成交量圖
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
     stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
@@ -199,44 +200,16 @@ def generate_kline_vol_chart(stock_id, chart_type="K"):
     df_plot = df_full[df_full.index >= cutoff_date].copy()
     df_plot.index = df_plot.index.tz_localize(None).normalize()
     
-    ap = []
-    
-    if stock_id.isdigit():
-        df_chip = get_chip_from_pyramid(stock_id)
-        if df_chip is not None and not df_chip.empty:
-            df_chip['Big_Diff'] = df_chip['Big_Holder'].diff()
-            df_chip['Retail_Diff'] = df_chip['Retail_Holder'].diff()
-            
-            df_chip['Big_Color'] = df_chip['Big_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-            df_chip['Retail_Color'] = df_chip['Retail_Diff'].apply(lambda x: '#ff4d4d' if x > 0 else ('#00b300' if x < 0 else '#808080'))
-
-            df_combined = pd.DataFrame(index=df_plot.index)
-            df_combined = df_combined.join(df_chip, how='left')
-            df_combined['Big_Holder'] = df_combined['Big_Holder'].ffill().bfill()
-            df_combined['Retail_Holder'] = df_combined['Retail_Holder'].ffill().bfill()
-            df_combined['Big_Color'] = df_combined['Big_Color'].ffill().bfill()
-            df_combined['Retail_Color'] = df_combined['Retail_Color'].ffill().bfill()
-
-            df_plot['Big_Holder'] = df_combined['Big_Holder']
-            df_plot['Retail_Holder'] = df_combined['Retail_Holder']
-            df_plot['Big_Color'] = df_combined['Big_Color']
-            df_plot['Retail_Color'] = df_combined['Retail_Color']
-
-            if not df_plot['Big_Holder'].isna().all():
-                ap.append(mpf.make_addplot(df_plot['Big_Holder'], panel=2, type='bar', color=df_plot['Big_Color'].tolist(), ylabel='Big(%)'))
-                ap.append(mpf.make_addplot(df_plot['Retail_Holder'], panel=3, type='bar', color=df_plot['Retail_Color'].tolist(), ylabel='Retail(%)'))
-    
     mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
     buf = io.BytesIO()
     
     title_str = f"{stock_id} 3M Chart"
-    panel_ratios = (4, 1.2, 1.5, 1.5) if ap else (4, 1)
     mpf.plot(df_plot, type='candle', volume=True, style=mpf.make_mpf_style(marketcolors=mc), mav=(5, 10, 20),
-             title=title_str, addplot=ap, panel_ratios=panel_ratios, figratio=(10, 13), savefig=buf)
+             title=title_str, figratio=(10, 8), savefig=buf)
     return upload_imgbb(buf)
 
 # ==========================================
-# 📊 5. 圖表二：外資、投信、融資動向圖 (融資單位調整為 1000)
+# 📊 5. 圖表二：外資、投信、融資動向圖 + 神秘金字塔多柱狀圖
 # ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
@@ -245,7 +218,10 @@ def generate_inst_margin_chart(stock_id):
         df_inst = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start_date)
         df_margin = dl.taiwan_stock_margin_purchase_short_sale(stock_id=stock_id, start_date=start_date)
         
-        if df_inst.empty and df_margin.empty: return None
+        # 爬取金字塔籌碼
+        df_chip = get_chip_from_pyramid(stock_id)
+        
+        if df_inst.empty and df_margin.empty and (df_chip is None or df_chip.empty): return None
         
         df_inst['date'] = pd.to_datetime(df_inst['date'])
         df_inst['buy'] = pd.to_numeric(df_inst['buy'], errors='coerce').fillna(0)
@@ -262,44 +238,85 @@ def generate_inst_margin_chart(stock_id):
                     df_margin[col] = 0
                 else:
                     df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
-            # 融資淨買賣超換算為「張」(除以 1000)
+            # 融資淨買賣超換算為「張」(除以 1000股)
             df_margin['margin_net'] = (df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell'] - df_margin['MarginPurchaseCashRepayment']) / 1000
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
         
-        dates = sorted(list(set(df_foreign['date'].tolist() + df_trust['date'].tolist() + df_margin['date'].tolist())))
+        # 合併所有日期，對齊 X 軸
+        all_dates = set(df_foreign['date'].tolist() + df_trust['date'].tolist() + df_margin['date'].tolist())
+        if df_chip is not None and not df_chip.empty:
+            all_dates.update(df_chip.index.tolist())
+            
+        dates = sorted(list(all_dates))
         df_plot = pd.DataFrame({'date': dates})
         df_plot = pd.merge(df_plot, df_foreign.rename(columns={'net': 'Foreign'}), on='date', how='left')
         df_plot = pd.merge(df_plot, df_trust.rename(columns={'net': 'Trust'}), on='date', how='left')
         df_plot = pd.merge(df_plot, df_margin[['date', 'margin_net']].rename(columns={'margin_net': 'Margin'}), on='date', how='left')
         
-        df_plot.fillna(0, inplace=True)
-        df_plot = df_plot.tail(60) 
+        if df_chip is not None and not df_chip.empty:
+            df_chip_temp = df_chip.reset_index().rename(columns={'Date': 'date'})
+            df_plot = pd.merge(df_plot, df_chip_temp[['date', 'Big_Holder', 'Retail_Holder']], on='date', how='left')
+        else:
+            df_plot['Big_Holder'] = np.nan
+            df_plot['Retail_Holder'] = np.nan
+            
+        df_plot['Foreign'] = df_plot['Foreign'].fillna(0)
+        df_plot['Trust'] = df_plot['Trust'].fillna(0)
+        df_plot['Margin'] = df_plot['Margin'].fillna(0)
         
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 7), sharex=True)
+        df_plot = df_plot.tail(60).reset_index(drop=True)
+        
+        # 開始繪圖 (擴增為 4 張圖)
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
         x_labels = df_plot['date'].dt.strftime('%m-%d')
-        x_pos = range(len(df_plot))
+        x_pos = np.arange(len(df_plot))
         
+        # 1. 外資
         ax1.bar(x_pos, df_plot['Foreign'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Foreign']])
-        ax1.set_title("Foreign Net (Lots)", loc='left', fontweight='bold')
+        ax1.set_title("外資買賣超 (單位: 張)", loc='left', fontweight='bold')
         ax1.set_ylim(calc_ylim(df_plot['Foreign']))
         ax1.axhline(0, color='black', linewidth=0.8)
         ax1.grid(True, alpha=0.3)
         
+        # 2. 投信
         ax2.bar(x_pos, df_plot['Trust'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Trust']])
-        ax2.set_title("Trust Net (Lots)", loc='left', fontweight='bold')
+        ax2.set_title("投信買賣超 (單位: 張)", loc='left', fontweight='bold')
         ax2.set_ylim(calc_ylim(df_plot['Trust']))
         ax2.axhline(0, color='black', linewidth=0.8)
         ax2.grid(True, alpha=0.3)
         
+        # 3. 融資
         ax3.bar(x_pos, df_plot['Margin'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Margin']])
-        ax3.set_title("Margin Net Buy/Sell (Lots)", loc='left', fontweight='bold')
+        ax3.set_title("融資買賣超 (單位: 張 / 1000股)", loc='left', fontweight='bold')
         ax3.set_ylim(calc_ylim(df_plot['Margin']))
         ax3.axhline(0, color='black', linewidth=0.8)
         ax3.grid(True, alpha=0.3)
         
-        ax3.set_xticks(x_pos[::5])
-        ax3.set_xticklabels(x_labels.iloc[::5], rotation=45)
+        # 4. 神秘金字塔 (多柱狀圖)
+        has_chip = not df_plot['Big_Holder'].isna().all()
+        if has_chip:
+            mask = df_plot['Big_Holder'].notna()
+            valid_x = x_pos[mask]
+            valid_big = df_plot['Big_Holder'][mask]
+            valid_retail = df_plot['Retail_Holder'][mask]
+            
+            # 使用並排偏移繪圖技術呈現多柱狀
+            ax4.bar(valid_x - 0.2, valid_big, width=0.4, label='>1000張大戶(%)', color='#ff4d4d', alpha=0.85)
+            ax4.bar(valid_x + 0.2, valid_retail, width=0.4, label='<10張散戶(%)', color='#00b300', alpha=0.85)
+            ax4.legend(loc='upper left', fontsize=9)
+            
+            y_min = min(valid_big.min(), valid_retail.min()) * 0.9
+            y_max = max(valid_big.max(), valid_retail.max()) * 1.1
+            ax4.set_ylim(y_min, y_max)
+        else:
+            ax4.text(0.5, 0.5, '無金字塔資料', ha='center', va='center', transform=ax4.transAxes)
+            
+        ax4.set_title("大戶 vs 散戶 持股比例 (單位: %)", loc='left', fontweight='bold')
+        ax4.grid(True, alpha=0.3)
+        
+        ax4.set_xticks(x_pos[::5])
+        ax4.set_xticklabels(x_labels.iloc[::5], rotation=45)
         plt.tight_layout()
         
         buf = io.BytesIO()
@@ -307,7 +324,7 @@ def generate_inst_margin_chart(stock_id):
         plt.close(fig)
         return upload_imgbb(buf)
     except Exception as e: 
-        print(f"外資融資圖繪製錯誤：{e}")
+        print(f"外資融資圖繪製錯誤：{traceback.format_exc()}")
         return None
 
 # ==========================================
@@ -328,13 +345,10 @@ def get_intraday_chart_url(ticker_symbol, title_name):
         mpf.plot(df, type='line', volume=False, style=s, title=f"{title_name} Intraday", savefig=buf)
         return upload_imgbb(buf)
     except Exception as e:
-        print(f"走勢圖繪製失敗 ({title_name}): {e}")
-    return None
+        return None
 
 def morning_all_in_one_report():
-    if MY_USER_ID == "請替換成您的_USER_ID":
-        print("尚未設定 MY_USER_ID，無法發送盤前報告")
-        return
+    if MY_USER_ID == "請替換成您的_USER_ID": return
 
     messages_to_send = []
     text_lines = ["🌅 【8:50 盤前戰情總匯】\n"]
@@ -399,7 +413,7 @@ def morning_all_in_one_report():
     try:
         line_bot_api.push_message(MY_USER_ID, messages_to_send)
     except Exception as e:
-        print(f"盤前總匯推播失敗: {e}")
+        pass
 
 # ==========================================
 # 🌐 7. LINE Bot 路由與訊息處理
