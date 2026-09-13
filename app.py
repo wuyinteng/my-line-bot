@@ -49,50 +49,60 @@ except Exception as e:
     pass
 
 # ==========================================
-# 🕷️ 2. 神秘金字塔爬蟲 (強化版欄位辨識)
+# 🕷️ 2. 神秘金字塔爬蟲 (防衝突極致版)
 # ==========================================
 def get_chip_from_pyramid(stock_id):
     url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        dfs = pd.read_html(StringIO(res.text))
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'
+        dfs = pd.read_html(StringIO(response.text))
         
         target_df = None
         for df in dfs:
-            text = df.to_string()
-            if '1000' in text and '10' in text and '日期' in text:
-                target_df = df
+            if len(df.columns) > 10 and '日期' in df.to_string():
+                target_df = df.copy()
                 break
                 
-        if target_df is None: return None
+        if target_df is None or target_df.empty: 
+            return None
             
+        # 將欄位名稱重置為數字，徹底避免「比例(%)」名稱重複導致報錯
+        target_df.columns = [str(i) for i in range(len(target_df.columns))]
+        
         date_col, big_col, retail_col = None, None, None
-        for c in target_df.columns:
-            col_data = target_df[c].astype(str)
-            col_str = " ".join(col_data.head(10)) + " " + str(c)
+        
+        # 掃描前 3 列的內容來精準定位所需欄位
+        for i in range(len(target_df.columns)):
+            col_name = str(i)
+            # 將前3列內容合併成字串判斷
+            header_text = " ".join(target_df[col_name].iloc[:3].astype(str).tolist())
             
-            if '日期' in col_str or '202' in col_str:
-                if date_col is None: date_col = c
-            if '1000' in col_str and ('%' in col_str or '占' in col_str or '比例' in col_str):
-                big_col = c
-            if '10' in col_str and '100' not in col_str and ('%' in col_str or '占' in col_str or '比例' in col_str):
-                retail_col = c
+            if '日期' in header_text:
+                if date_col is None: date_col = col_name
+            elif '1000' in header_text and ('%' in header_text or '比例' in header_text):
+                big_col = col_name
+            elif '10' in header_text and '50' not in header_text and '100' not in header_text and ('%' in header_text or '比例' in header_text):
+                retail_col = col_name
 
-        if date_col is None or big_col is None or retail_col is None: 
+        if not (date_col and big_col and retail_col):
             return None
 
         clean_df = target_df[[date_col, big_col, retail_col]].copy()
         clean_df.columns = ['Date', 'Big_Holder', 'Retail_Holder']
+        clean_df = clean_df.dropna()
         
+        # 清理字串與轉換
         clean_df['Date'] = clean_df['Date'].astype(str).str.replace(r'[/\\-]', '', regex=True).str.strip()
         clean_df = clean_df[clean_df['Date'].str.startswith('20')] 
+        clean_df['Date'] = pd.to_datetime(clean_df['Date'].str[:8], format='%Y%m%d', errors='coerce')
         
-        clean_df['Big_Holder'] = pd.to_numeric(clean_df['Big_Holder'].astype(str).str.replace('%', ''), errors='coerce')
-        clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', ''), errors='coerce')
+        clean_df['Big_Holder'] = pd.to_numeric(clean_df['Big_Holder'].astype(str).str.replace('%', '', regex=False), errors='coerce')
+        clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', '', regex=False), errors='coerce')
         
-        clean_df['Date'] = pd.to_datetime(clean_df['Date'], format='%Y%m%d', errors='coerce')
         clean_df = clean_df.dropna(subset=['Date', 'Big_Holder']).sort_values('Date').tail(15)
         
         # 校正週末日期至週五，對齊交易日
@@ -102,28 +112,28 @@ def get_chip_from_pyramid(stock_id):
         clean_df.index = clean_df.index.normalize()
         return clean_df
     except Exception as e:
-        print(f"Pyramid error: {e}")
+        print(f"Pyramid Data Error: {e}")
         return None
 
 # ==========================================
-# 📈 3. 文字現況報告 & 上傳工具
+# 📈 3. 文字現況報告 (維持全中文)
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
     if msg.isdigit() and len(msg) >= 4:
         try:
             stock_name = tw_stock_dict.get(msg, "")
-            name_display = f"{stock_name} ({msg})" if stock_name else f"Code：{msg}"
+            name_display = f"{stock_name} ({msg})" if stock_name else f"代碼：{msg}"
             start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             df = dl.taiwan_stock_daily(stock_id=msg, start_date=start_date)
             
-            if df.empty: return f"Cannot find data for 【{name_display}】"
+            if df.empty: return f"找不到台股【{name_display}】資料"
             if len(df) >= 2:
                 tc, pc = df['close'].iloc[-1], df['close'].iloc[-2]
                 dp, pp = tc - pc, (tc - pc) / pc * 100
                 sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
-                return (f"📊 【Quote】{name_display}\n"
-                        f"▪️ Price：{tc:.2f} TWD\n▪️ Change：{sp}{dp:+.2f} ({pp:+.2f}%)")
+                return (f"📊 【股票報價】{name_display}\n"
+                        f"▪️ 成交價：{tc:.2f} TWD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
         except: return None
     return None
 
@@ -154,9 +164,9 @@ def get_holding_shares_info(stock_id):
         
         if not found_stock: return ""
         formatted_date = f"{latest_date[:4]}-{latest_date[4:6]}-{latest_date[6:]}" if len(latest_date) == 8 else latest_date
-        return (f"\n\n👥 【TDCC Holders】({formatted_date})\n"
-                f"👑 >1000 Lots：{big_percent:.2f}%\n"
-                f"🐟 <10 Lots：{small_percent:.2f}%")
+        return (f"\n\n👥 【集保籌碼現況】({formatted_date})\n"
+                f"👑 千張大戶佔比：{big_percent:.2f}%\n"
+                f"🐟 10張散戶佔比：{small_percent:.2f}%")
     except: return ""
 
 def upload_imgbb(buf):
@@ -179,7 +189,7 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 4. 圖表一：純淨版 K線與成交量圖
+# 🎨 4. 圖表一：K線與成交量圖 (全英文標籤)
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
     stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
@@ -211,7 +221,7 @@ def generate_kline_vol_chart(stock_id, chart_type="K"):
     return upload_imgbb(buf)
 
 # ==========================================
-# 📊 5. 圖表二：三大法人與籌碼動向圖 (全英文 + 滿版填充柱狀圖)
+# 📊 5. 圖表二：三大法人與籌碼動向圖 (全英文圖表)
 # ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
@@ -224,15 +234,19 @@ def generate_inst_margin_chart(stock_id):
         
         if df_inst.empty and df_margin.empty and (df_chip is None or df_chip.empty): return None
         
-        df_inst['date'] = pd.to_datetime(df_inst['date'])
-        df_inst['buy'] = pd.to_numeric(df_inst['buy'], errors='coerce').fillna(0)
-        df_inst['sell'] = pd.to_numeric(df_inst['sell'], errors='coerce').fillna(0)
-        df_inst['net'] = (df_inst['buy'] - df_inst['sell']) / 1000  
+        # 處理外資、投信
+        if not df_inst.empty:
+            df_inst['date'] = pd.to_datetime(df_inst['date'])
+            df_inst['buy'] = pd.to_numeric(df_inst['buy'], errors='coerce').fillna(0)
+            df_inst['sell'] = pd.to_numeric(df_inst['sell'], errors='coerce').fillna(0)
+            df_inst['net'] = (df_inst['buy'] - df_inst['sell']) / 1000  
+            df_foreign = df_inst[df_inst['name'].str.contains('外資|外陸|Foreign', na=False, case=False)].groupby('date')['net'].sum().reset_index()
+            df_trust = df_inst[df_inst['name'].str.contains('投信|Trust', na=False, case=False)].groupby('date')['net'].sum().reset_index()
+        else:
+            df_foreign = pd.DataFrame(columns=['date', 'net'])
+            df_trust = pd.DataFrame(columns=['date', 'net'])
         
-        df_foreign = df_inst[df_inst['name'].str.contains('外資|外陸|Foreign', na=False, case=False)].groupby('date')['net'].sum().reset_index()
-        df_trust = df_inst[df_inst['name'].str.contains('投信|Trust', na=False, case=False)].groupby('date')['net'].sum().reset_index()
-        
-        # 兼容 FinMind 不同版本回傳的大小寫欄位
+        # 處理融資，精準換算為張數 (/1000)
         if not df_margin.empty:
             df_margin['date'] = pd.to_datetime(df_margin['date'])
             buy_col = 'margin_purchase_buy' if 'margin_purchase_buy' in df_margin.columns else 'MarginPurchaseBuy'
@@ -240,9 +254,10 @@ def generate_inst_margin_chart(stock_id):
             repay_col = 'margin_purchase_cash_repayment' if 'margin_purchase_cash_repayment' in df_margin.columns else 'MarginPurchaseCashRepayment'
             
             if buy_col in df_margin.columns:
-                for col in [buy_col, sell_col, repay_col]:
-                    df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
-                # 確實除以 1000 將股數換算成「張 (Lots)」
+                df_margin[buy_col] = pd.to_numeric(df_margin[buy_col], errors='coerce').fillna(0)
+                df_margin[sell_col] = pd.to_numeric(df_margin[sell_col], errors='coerce').fillna(0)
+                df_margin[repay_col] = pd.to_numeric(df_margin[repay_col], errors='coerce').fillna(0)
+                # 買進 - 賣出 - 現金償還，再除以 1000 換算成張數 (Lots)
                 df_margin['margin_net'] = (df_margin[buy_col] - df_margin[sell_col] - df_margin[repay_col]) / 1000
             else:
                 df_margin['margin_net'] = 0
@@ -260,6 +275,7 @@ def generate_inst_margin_chart(stock_id):
         df_plot = pd.merge(df_plot, df_trust.rename(columns={'net': 'Trust'}), on='date', how='left')
         df_plot = pd.merge(df_plot, df_margin[['date', 'margin_net']].rename(columns={'margin_net': 'Margin'}), on='date', how='left')
         
+        # 加入金字塔大戶與散戶資料
         if df_chip is not None and not df_chip.empty:
             df_chip_temp = df_chip.reset_index().rename(columns={'Date': 'date'})
             df_plot = pd.merge(df_plot, df_chip_temp[['date', 'Big_Holder', 'Retail_Holder']], on='date', how='left')
@@ -267,7 +283,7 @@ def generate_inst_margin_chart(stock_id):
             df_plot['Big_Holder'] = np.nan
             df_plot['Retail_Holder'] = np.nan
             
-        # 前向與後向填補：讓神秘金字塔數據能鋪滿每天，形成連續粗壯的柱狀圖
+        # 前向與後向填補：讓神秘金字塔數據鋪滿 X 軸以形成連續柱狀圖
         df_plot['Big_Holder'] = df_plot['Big_Holder'].ffill().bfill()
         df_plot['Retail_Holder'] = df_plot['Retail_Holder'].ffill().bfill()
         
@@ -275,41 +291,42 @@ def generate_inst_margin_chart(stock_id):
         df_plot['Trust'] = df_plot['Trust'].fillna(0)
         df_plot['Margin'] = df_plot['Margin'].fillna(0)
         
+        # 取近 60 筆資料繪圖
         df_plot = df_plot.tail(60).reset_index(drop=True)
         
         fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
         x_labels = df_plot['date'].dt.strftime('%m-%d')
         x_pos = np.arange(len(df_plot))
         
-        # 1. Foreign
+        # 1. 外資 (Foreign)
         ax1.bar(x_pos, df_plot['Foreign'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Foreign']])
         ax1.set_title("Foreign Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax1.set_ylim(calc_ylim(df_plot['Foreign']))
         ax1.axhline(0, color='black', linewidth=0.8)
         ax1.grid(True, alpha=0.3)
         
-        # 2. Trust
+        # 2. 投信 (Trust)
         ax2.bar(x_pos, df_plot['Trust'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Trust']])
         ax2.set_title("Trust Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax2.set_ylim(calc_ylim(df_plot['Trust']))
         ax2.axhline(0, color='black', linewidth=0.8)
         ax2.grid(True, alpha=0.3)
         
-        # 3. Margin
+        # 3. 融資 (Margin)
         ax3.bar(x_pos, df_plot['Margin'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Margin']])
         ax3.set_title("Margin Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax3.set_ylim(calc_ylim(df_plot['Margin']))
         ax3.axhline(0, color='black', linewidth=0.8)
         ax3.grid(True, alpha=0.3)
         
-        # 4. Holders (Pyramid)
+        # 4. 籌碼金字塔 (Holders)
         has_chip = not df_plot['Big_Holder'].isna().all()
         if has_chip:
             valid_x = x_pos
             valid_big = df_plot['Big_Holder']
             valid_retail = df_plot['Retail_Holder']
             
-            # 使用並排偏移繪圖技術呈現多柱狀
+            # 並排偏移多柱狀圖技術
             ax4.bar(valid_x - 0.2, valid_big, width=0.4, label='>1000 Lots (%)', color='#ff4d4d', alpha=0.85)
             ax4.bar(valid_x + 0.2, valid_retail, width=0.4, label='<10 Lots (%)', color='#00b300', alpha=0.85)
             ax4.legend(loc='upper left', fontsize=9)
@@ -336,9 +353,8 @@ def generate_inst_margin_chart(stock_id):
         return None
 
 # ==========================================
-# 🚀 6. 8:50 盤前戰情總匯引擎 & Line Bot 路由
+# 🚀 6. 8:50 盤前戰情總匯引擎 & Line Bot 路由 (全中文訊息)
 # ==========================================
-# (此部分維持原樣，保留您原本的業務邏輯設定)
 def get_intraday_chart_url(ticker_symbol, title_name):
     try:
         stock = yf.Ticker(ticker_symbol)
