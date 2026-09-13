@@ -49,7 +49,7 @@ except Exception as e:
     pass
 
 # ==========================================
-# 🕷️ 2. 神秘金字塔爬蟲 (抓取近 3 個月約 12 筆大戶/散戶歷史資料)
+# 🕷️ 2. 神秘金字塔爬蟲 (強化版欄位辨識)
 # ==========================================
 def get_chip_from_pyramid(stock_id):
     url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
@@ -57,12 +57,12 @@ def get_chip_from_pyramid(stock_id):
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
-        dfs = pd.read_html(StringIO(res.text), header=None)
+        dfs = pd.read_html(StringIO(res.text))
         
         target_df = None
         for df in dfs:
-            head_str = "".join(df.head(3).astype(str).values.flatten())
-            if '日期' in head_str and '1000' in head_str:
+            text = df.to_string()
+            if '1000' in text and '10' in text and '日期' in text:
                 target_df = df
                 break
                 
@@ -70,56 +70,60 @@ def get_chip_from_pyramid(stock_id):
             
         date_col, big_col, retail_col = None, None, None
         for c in target_df.columns:
-            col_text = "".join(target_df[c].head(3).astype(str).tolist())
-            if '日期' in col_text: date_col = c
-            if '1000' in col_text and '%' in col_text: big_col = c
-            if '10' in col_text and '100' not in col_text and '%' in col_text: retail_col = c
+            col_data = target_df[c].astype(str)
+            col_str = " ".join(col_data.head(10)) + " " + str(c)
+            
+            if '日期' in col_str or '202' in col_str:
+                if date_col is None: date_col = c
+            if '1000' in col_str and ('%' in col_str or '占' in col_str or '比例' in col_str):
+                big_col = c
+            if '10' in col_str and '100' not in col_str and ('%' in col_str or '占' in col_str or '比例' in col_str):
+                retail_col = c
 
-        if date_col is None or big_col is None or retail_col is None: return None
+        if date_col is None or big_col is None or retail_col is None: 
+            return None
 
         clean_df = target_df[[date_col, big_col, retail_col]].copy()
         clean_df.columns = ['Date', 'Big_Holder', 'Retail_Holder']
-        clean_df = clean_df.dropna()
         
-        clean_df['Date'] = clean_df['Date'].astype(str).str.replace('/', '').str.replace('-', '').str.strip()
+        clean_df['Date'] = clean_df['Date'].astype(str).str.replace(r'[/\\-]', '', regex=True).str.strip()
         clean_df = clean_df[clean_df['Date'].str.startswith('20')] 
         
         clean_df['Big_Holder'] = pd.to_numeric(clean_df['Big_Holder'].astype(str).str.replace('%', ''), errors='coerce')
         clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', ''), errors='coerce')
         
         clean_df['Date'] = pd.to_datetime(clean_df['Date'], format='%Y%m%d', errors='coerce')
+        clean_df = clean_df.dropna(subset=['Date', 'Big_Holder']).sort_values('Date').tail(15)
         
-        # 校正週末日期至週五，避免與交易日錯開
+        # 校正週末日期至週五，對齊交易日
         clean_df['Date'] = clean_df['Date'].apply(lambda d: d - pd.Timedelta(days=d.weekday() - 4) if d.weekday() > 4 else d)
         
-        # 取最後 12 筆（約 3 個月週資料）
-        clean_df = clean_df.dropna(subset=['Date']).sort_values('Date').tail(12).set_index('Date')
+        clean_df = clean_df.set_index('Date')
         clean_df.index = clean_df.index.normalize()
-        
         return clean_df
     except Exception as e:
-        print(f"神秘金字塔爬取失敗: {e}")
+        print(f"Pyramid error: {e}")
         return None
 
 # ==========================================
-# 📈 3. 文字現況報告
+# 📈 3. 文字現況報告 & 上傳工具
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
     if msg.isdigit() and len(msg) >= 4:
         try:
             stock_name = tw_stock_dict.get(msg, "")
-            name_display = f"{stock_name} ({msg})" if stock_name else f"代碼：{msg}"
+            name_display = f"{stock_name} ({msg})" if stock_name else f"Code：{msg}"
             start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             df = dl.taiwan_stock_daily(stock_id=msg, start_date=start_date)
             
-            if df.empty: return f"找不到台股【{name_display}】資料"
+            if df.empty: return f"Cannot find data for 【{name_display}】"
             if len(df) >= 2:
-                tc, to, pc = df['close'].iloc[-1], df['open'].iloc[-1], df['close'].iloc[-2]
+                tc, pc = df['close'].iloc[-1], df['close'].iloc[-2]
                 dp, pp = tc - pc, (tc - pc) / pc * 100
                 sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
-                return (f"📊 【股票報價】{name_display}\n"
-                        f"▪️ 成交價：{tc:.2f} TWD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
+                return (f"📊 【Quote】{name_display}\n"
+                        f"▪️ Price：{tc:.2f} TWD\n▪️ Change：{sp}{dp:+.2f} ({pp:+.2f}%)")
         except: return None
     return None
 
@@ -150,9 +154,9 @@ def get_holding_shares_info(stock_id):
         
         if not found_stock: return ""
         formatted_date = f"{latest_date[:4]}-{latest_date[4:6]}-{latest_date[6:]}" if len(latest_date) == 8 else latest_date
-        return (f"\n\n👥 【集保籌碼現況】({formatted_date})\n"
-                f"👑 千張大戶佔比：{big_percent:.2f}%\n"
-                f"🐟 10張散戶佔比：{small_percent:.2f}%")
+        return (f"\n\n👥 【TDCC Holders】({formatted_date})\n"
+                f"👑 >1000 Lots：{big_percent:.2f}%\n"
+                f"🐟 <10 Lots：{small_percent:.2f}%")
     except: return ""
 
 def upload_imgbb(buf):
@@ -161,13 +165,11 @@ def upload_imgbb(buf):
         payload = {"key": "6d207e02198a847aa98d0a2a901485a5"} 
         buf.seek(0)
         files = {"source": ('chart.png', buf.getvalue(), 'image/png')}
-        
         res = requests.post(url, data=payload, files=files, timeout=20)
         if res.status_code == 200:
             return res.json()['image']['url']
-        else:
-            return None
-    except Exception as e:
+        return None
+    except:
         return None
 
 def calc_ylim(series):
@@ -209,7 +211,7 @@ def generate_kline_vol_chart(stock_id, chart_type="K"):
     return upload_imgbb(buf)
 
 # ==========================================
-# 📊 5. 圖表二：外資、投信、融資動向圖 + 神秘金字塔多柱狀圖
+# 📊 5. 圖表二：三大法人與籌碼動向圖 (全英文 + 滿版填充柱狀圖)
 # ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
@@ -218,7 +220,6 @@ def generate_inst_margin_chart(stock_id):
         df_inst = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start_date)
         df_margin = dl.taiwan_stock_margin_purchase_short_sale(stock_id=stock_id, start_date=start_date)
         
-        # 爬取金字塔籌碼
         df_chip = get_chip_from_pyramid(stock_id)
         
         if df_inst.empty and df_margin.empty and (df_chip is None or df_chip.empty): return None
@@ -231,19 +232,24 @@ def generate_inst_margin_chart(stock_id):
         df_foreign = df_inst[df_inst['name'].str.contains('外資|外陸|Foreign', na=False, case=False)].groupby('date')['net'].sum().reset_index()
         df_trust = df_inst[df_inst['name'].str.contains('投信|Trust', na=False, case=False)].groupby('date')['net'].sum().reset_index()
         
+        # 兼容 FinMind 不同版本回傳的大小寫欄位
         if not df_margin.empty:
             df_margin['date'] = pd.to_datetime(df_margin['date'])
-            for col in ['MarginPurchaseBuy', 'MarginPurchaseSell', 'MarginPurchaseCashRepayment']:
-                if col not in df_margin.columns:
-                    df_margin[col] = 0
-                else:
+            buy_col = 'margin_purchase_buy' if 'margin_purchase_buy' in df_margin.columns else 'MarginPurchaseBuy'
+            sell_col = 'margin_purchase_sell' if 'margin_purchase_sell' in df_margin.columns else 'MarginPurchaseSell'
+            repay_col = 'margin_purchase_cash_repayment' if 'margin_purchase_cash_repayment' in df_margin.columns else 'MarginPurchaseCashRepayment'
+            
+            if buy_col in df_margin.columns:
+                for col in [buy_col, sell_col, repay_col]:
                     df_margin[col] = pd.to_numeric(df_margin[col], errors='coerce').fillna(0)
-            # 融資淨買賣超換算為「張」(除以 1000股)
-            df_margin['margin_net'] = (df_margin['MarginPurchaseBuy'] - df_margin['MarginPurchaseSell'] - df_margin['MarginPurchaseCashRepayment']) / 1000
+                # 確實除以 1000 將股數換算成「張 (Lots)」
+                df_margin['margin_net'] = (df_margin[buy_col] - df_margin[sell_col] - df_margin[repay_col]) / 1000
+            else:
+                df_margin['margin_net'] = 0
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
         
-        # 合併所有日期，對齊 X 軸
+        # 合併 X 軸
         all_dates = set(df_foreign['date'].tolist() + df_trust['date'].tolist() + df_margin['date'].tolist())
         if df_chip is not None and not df_chip.empty:
             all_dates.update(df_chip.index.tolist())
@@ -261,58 +267,60 @@ def generate_inst_margin_chart(stock_id):
             df_plot['Big_Holder'] = np.nan
             df_plot['Retail_Holder'] = np.nan
             
+        # 前向與後向填補：讓神秘金字塔數據能鋪滿每天，形成連續粗壯的柱狀圖
+        df_plot['Big_Holder'] = df_plot['Big_Holder'].ffill().bfill()
+        df_plot['Retail_Holder'] = df_plot['Retail_Holder'].ffill().bfill()
+        
         df_plot['Foreign'] = df_plot['Foreign'].fillna(0)
         df_plot['Trust'] = df_plot['Trust'].fillna(0)
         df_plot['Margin'] = df_plot['Margin'].fillna(0)
         
         df_plot = df_plot.tail(60).reset_index(drop=True)
         
-        # 開始繪圖 (擴增為 4 張圖)
         fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
         x_labels = df_plot['date'].dt.strftime('%m-%d')
         x_pos = np.arange(len(df_plot))
         
-        # 1. 外資
+        # 1. Foreign
         ax1.bar(x_pos, df_plot['Foreign'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Foreign']])
-        ax1.set_title("外資買賣超 (單位: 張)", loc='left', fontweight='bold')
+        ax1.set_title("Foreign Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax1.set_ylim(calc_ylim(df_plot['Foreign']))
         ax1.axhline(0, color='black', linewidth=0.8)
         ax1.grid(True, alpha=0.3)
         
-        # 2. 投信
+        # 2. Trust
         ax2.bar(x_pos, df_plot['Trust'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Trust']])
-        ax2.set_title("投信買賣超 (單位: 張)", loc='left', fontweight='bold')
+        ax2.set_title("Trust Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax2.set_ylim(calc_ylim(df_plot['Trust']))
         ax2.axhline(0, color='black', linewidth=0.8)
         ax2.grid(True, alpha=0.3)
         
-        # 3. 融資
+        # 3. Margin
         ax3.bar(x_pos, df_plot['Margin'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Margin']])
-        ax3.set_title("融資買賣超 (單位: 張 / 1000股)", loc='left', fontweight='bold')
+        ax3.set_title("Margin Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax3.set_ylim(calc_ylim(df_plot['Margin']))
         ax3.axhline(0, color='black', linewidth=0.8)
         ax3.grid(True, alpha=0.3)
         
-        # 4. 神秘金字塔 (多柱狀圖)
+        # 4. Holders (Pyramid)
         has_chip = not df_plot['Big_Holder'].isna().all()
         if has_chip:
-            mask = df_plot['Big_Holder'].notna()
-            valid_x = x_pos[mask]
-            valid_big = df_plot['Big_Holder'][mask]
-            valid_retail = df_plot['Retail_Holder'][mask]
+            valid_x = x_pos
+            valid_big = df_plot['Big_Holder']
+            valid_retail = df_plot['Retail_Holder']
             
             # 使用並排偏移繪圖技術呈現多柱狀
-            ax4.bar(valid_x - 0.2, valid_big, width=0.4, label='>1000張大戶(%)', color='#ff4d4d', alpha=0.85)
-            ax4.bar(valid_x + 0.2, valid_retail, width=0.4, label='<10張散戶(%)', color='#00b300', alpha=0.85)
+            ax4.bar(valid_x - 0.2, valid_big, width=0.4, label='>1000 Lots (%)', color='#ff4d4d', alpha=0.85)
+            ax4.bar(valid_x + 0.2, valid_retail, width=0.4, label='<10 Lots (%)', color='#00b300', alpha=0.85)
             ax4.legend(loc='upper left', fontsize=9)
             
-            y_min = min(valid_big.min(), valid_retail.min()) * 0.9
-            y_max = max(valid_big.max(), valid_retail.max()) * 1.1
+            y_min = min(valid_big.min(), valid_retail.min()) * 0.95
+            y_max = max(valid_big.max(), valid_retail.max()) * 1.05
             ax4.set_ylim(y_min, y_max)
         else:
-            ax4.text(0.5, 0.5, '無金字塔資料', ha='center', va='center', transform=ax4.transAxes)
+            ax4.text(0.5, 0.5, 'No Pyramid Data', ha='center', va='center', transform=ax4.transAxes)
             
-        ax4.set_title("大戶 vs 散戶 持股比例 (單位: %)", loc='left', fontweight='bold')
+        ax4.set_title("Holders: >1000 Lots vs <10 Lots (%)", loc='left', fontweight='bold')
         ax4.grid(True, alpha=0.3)
         
         ax4.set_xticks(x_pos[::5])
@@ -324,12 +332,13 @@ def generate_inst_margin_chart(stock_id):
         plt.close(fig)
         return upload_imgbb(buf)
     except Exception as e: 
-        print(f"外資融資圖繪製錯誤：{traceback.format_exc()}")
+        print(f"Chart Error: {traceback.format_exc()}")
         return None
 
 # ==========================================
-# 🚀 6. 8:50 盤前戰情總匯引擎
+# 🚀 6. 8:50 盤前戰情總匯引擎 & Line Bot 路由
 # ==========================================
+# (此部分維持原樣，保留您原本的業務邏輯設定)
 def get_intraday_chart_url(ticker_symbol, title_name):
     try:
         stock = yf.Ticker(ticker_symbol)
@@ -415,9 +424,6 @@ def morning_all_in_one_report():
     except Exception as e:
         pass
 
-# ==========================================
-# 🌐 7. LINE Bot 路由與訊息處理
-# ==========================================
 @app.route("/", methods=['GET'])
 def index():
     return "LINE Bot is running!"
@@ -484,9 +490,6 @@ def handle_message(event):
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
 
-# ==========================================
-# ⏰ 8. 啟動伺服器與鬧鐘排程
-# ==========================================
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone="Asia/Taipei")
     scheduler.add_job(morning_all_in_one_report, 'cron', day_of_week='mon-fri', hour=8, minute=50)
