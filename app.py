@@ -284,7 +284,7 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, msgs)[cite: 14]
             else:
                 line_bot_api.reply_message(event.reply_token, [
-                    TextSendMessage(text=f"✅ 已經為您繪製【{stock_id}】的今日盤中走勢圖囉！"),[cite: 14]
+                    TextSendMessage(text=f"✅ 已經為您繪製【{stock_id}】的今日盤中走勢圖囉！"),
                     ImageSendMessage(original_content_url=url_main, preview_image_url=url_main)[cite: 14]
                 ])
         else: 
