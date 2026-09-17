@@ -153,7 +153,7 @@ def get_holding_shares_info(stock_id):
             if len(cols) >= 6:
                 if cols[1] == stock_id:
                     found_stock = True
-                    latest_date, level = cols[0], cols[2]
+                    latest_date, level = cols[2] if len(cols)>2 else "", cols[2]
                     try:
                         percent = float(cols[5])
                         if level == '15': big_percent = percent
@@ -189,7 +189,7 @@ def calc_ylim(series):
     return (s_min - rng * 0.1, s_max + rng * 0.1)
 
 # ==========================================
-# 🎨 4. 圖表一：K線與成交量圖 (全英文標籤)
+# 🎨 4. 圖表一：K線與成交量圖
 # ==========================================
 def generate_kline_vol_chart(stock_id, chart_type="K"):
     stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
@@ -221,7 +221,7 @@ def generate_kline_vol_chart(stock_id, chart_type="K"):
     return upload_imgbb(buf)
 
 # ==========================================
-# 📊 5. 圖表二：三大法人與籌碼動向圖 (全英文圖表)
+# 📊 5. 圖表二：三大法人與籌碼動向圖 (優化多柱狀圖)
 # ==========================================
 def generate_inst_margin_chart(stock_id):
     if not stock_id.isdigit(): return None
@@ -234,7 +234,6 @@ def generate_inst_margin_chart(stock_id):
         
         if df_inst.empty and df_margin.empty and (df_chip is None or df_chip.empty): return None
         
-        # 處理外資、投信
         if not df_inst.empty:
             df_inst['date'] = pd.to_datetime(df_inst['date'])
             df_inst['buy'] = pd.to_numeric(df_inst['buy'], errors='coerce').fillna(0)
@@ -246,7 +245,6 @@ def generate_inst_margin_chart(stock_id):
             df_foreign = pd.DataFrame(columns=['date', 'net'])
             df_trust = pd.DataFrame(columns=['date', 'net'])
         
-        # 處理融資，精準換算為張數 (/1000)
         if not df_margin.empty:
             df_margin['date'] = pd.to_datetime(df_margin['date'])
             buy_col = 'margin_purchase_buy' if 'margin_purchase_buy' in df_margin.columns else 'MarginPurchaseBuy'
@@ -257,14 +255,12 @@ def generate_inst_margin_chart(stock_id):
                 df_margin[buy_col] = pd.to_numeric(df_margin[buy_col], errors='coerce').fillna(0)
                 df_margin[sell_col] = pd.to_numeric(df_margin[sell_col], errors='coerce').fillna(0)
                 df_margin[repay_col] = pd.to_numeric(df_margin[repay_col], errors='coerce').fillna(0)
-                # 買進 - 賣出 - 現金償還，再除以 1000 換算成張數 (Lots)
                 df_margin['margin_net'] = (df_margin[buy_col] - df_margin[sell_col] - df_margin[repay_col]) / 1000
             else:
                 df_margin['margin_net'] = 0
         else:
             df_margin = pd.DataFrame(columns=['date', 'margin_net'])
         
-        # 合併 X 軸
         all_dates = set(df_foreign['date'].tolist() + df_trust['date'].tolist() + df_margin['date'].tolist())
         if df_chip is not None and not df_chip.empty:
             all_dates.update(df_chip.index.tolist())
@@ -275,7 +271,6 @@ def generate_inst_margin_chart(stock_id):
         df_plot = pd.merge(df_plot, df_trust.rename(columns={'net': 'Trust'}), on='date', how='left')
         df_plot = pd.merge(df_plot, df_margin[['date', 'margin_net']].rename(columns={'margin_net': 'Margin'}), on='date', how='left')
         
-        # 加入金字塔大戶與散戶資料
         if df_chip is not None and not df_chip.empty:
             df_chip_temp = df_chip.reset_index().rename(columns={'Date': 'date'})
             df_plot = pd.merge(df_plot, df_chip_temp[['date', 'Big_Holder', 'Retail_Holder']], on='date', how='left')
@@ -283,7 +278,6 @@ def generate_inst_margin_chart(stock_id):
             df_plot['Big_Holder'] = np.nan
             df_plot['Retail_Holder'] = np.nan
             
-        # 前向與後向填補：讓神秘金字塔數據鋪滿 X 軸以形成連續柱狀圖
         df_plot['Big_Holder'] = df_plot['Big_Holder'].ffill().bfill()
         df_plot['Retail_Holder'] = df_plot['Retail_Holder'].ffill().bfill()
         
@@ -291,53 +285,61 @@ def generate_inst_margin_chart(stock_id):
         df_plot['Trust'] = df_plot['Trust'].fillna(0)
         df_plot['Margin'] = df_plot['Margin'].fillna(0)
         
-        # 取近 60 筆資料繪圖
         df_plot = df_plot.tail(60).reset_index(drop=True)
         
         fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
         x_labels = df_plot['date'].dt.strftime('%m-%d')
         x_pos = np.arange(len(df_plot))
         
-        # 1. 外資 (Foreign)
+        # 1. 外資
         ax1.bar(x_pos, df_plot['Foreign'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Foreign']])
         ax1.set_title("Foreign Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax1.set_ylim(calc_ylim(df_plot['Foreign']))
         ax1.axhline(0, color='black', linewidth=0.8)
         ax1.grid(True, alpha=0.3)
         
-        # 2. 投信 (Trust)
+        # 2. 投信
         ax2.bar(x_pos, df_plot['Trust'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Trust']])
         ax2.set_title("Trust Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax2.set_ylim(calc_ylim(df_plot['Trust']))
         ax2.axhline(0, color='black', linewidth=0.8)
         ax2.grid(True, alpha=0.3)
         
-        # 3. 融資 (Margin)
+        # 3. 融資
         ax3.bar(x_pos, df_plot['Margin'], color=['#ff4d4d' if x > 0 else '#00b300' for x in df_plot['Margin']])
         ax3.set_title("Margin Net Buy/Sell (Lots)", loc='left', fontweight='bold')
         ax3.set_ylim(calc_ylim(df_plot['Margin']))
         ax3.axhline(0, color='black', linewidth=0.8)
         ax3.grid(True, alpha=0.3)
         
-        # 4. 籌碼金字塔 (Holders)
+        # 4. 籌碼金字塔 (雙Y軸多柱狀圖)
         has_chip = not df_plot['Big_Holder'].isna().all()
         if has_chip:
             valid_x = x_pos
             valid_big = df_plot['Big_Holder']
             valid_retail = df_plot['Retail_Holder']
             
-            # 並排偏移多柱狀圖技術
-            ax4.bar(valid_x - 0.2, valid_big, width=0.4, label='>1000 Lots (%)', color='#ff4d4d', alpha=0.85)
-            ax4.bar(valid_x + 0.2, valid_retail, width=0.4, label='<10 Lots (%)', color='#00b300', alpha=0.85)
-            ax4.legend(loc='upper left', fontsize=9)
+            ax4_twin = ax4.twinx() # 建立右邊獨立 Y 軸，解決大戶與散戶比例懸殊的問題
+            width = 0.35
             
-            y_min = min(valid_big.min(), valid_retail.min()) * 0.95
-            y_max = max(valid_big.max(), valid_retail.max()) * 1.05
-            ax4.set_ylim(y_min, y_max)
+            b1 = ax4.bar(valid_x - width/2, valid_big, width=width, label='>1000 Lots (%)', color='#ff4d4d', alpha=0.85)
+            b2 = ax4_twin.bar(valid_x + width/2, valid_retail, width=width, label='<10 Lots (%)', color='#00b300', alpha=0.85)
+            
+            # 整合兩條 Y 軸的圖例
+            lines, labels = ax4.get_legend_handles_labels()
+            lines2, labels2 = ax4_twin.get_legend_handles_labels()
+            ax4_twin.legend(lines + lines2, labels + labels2, loc='upper left', fontsize=9)
+            
+            # 各自設定 Y 軸上下限，讓趨勢都能看得清楚
+            ax4.set_ylim(valid_big.min() * 0.95, valid_big.max() * 1.05)
+            ax4_twin.set_ylim(valid_retail.min() * 0.95, valid_retail.max() * 1.05)
+            
+            ax4.set_ylabel('>1000 Lots (%)', color='#ff4d4d', fontweight='bold')
+            ax4_twin.set_ylabel('<10 Lots (%)', color='#00b300', fontweight='bold')
         else:
             ax4.text(0.5, 0.5, 'No Pyramid Data', ha='center', va='center', transform=ax4.transAxes)
             
-        ax4.set_title("Holders: >1000 Lots vs <10 Lots (%)", loc='left', fontweight='bold')
+        ax4.set_title("Holders Distribution (%)", loc='left', fontweight='bold')
         ax4.grid(True, alpha=0.3)
         
         ax4.set_xticks(x_pos[::5])
@@ -353,21 +355,30 @@ def generate_inst_margin_chart(stock_id):
         return None
 
 # ==========================================
-# 🚀 6. 8:50 盤前戰情總匯引擎 & Line Bot 路由 (全中文訊息)
+# 🚀 6. 8:50 盤前戰情總匯引擎 & Line Bot 路由
 # ==========================================
 def get_intraday_chart_url(ticker_symbol, title_name):
     try:
         stock = yf.Ticker(ticker_symbol)
         df = stock.history(period="1d", interval="5m")
+        if df.empty: 
+            # 預防某些指數（如費半）可能假日或盤後無 5m 資料，改抓日線作為備案
+            df = stock.history(period="5d")
+            
         if df.empty: return None
         
         df = df.dropna(subset=['Close'])
         df.index = df.index.tz_localize(None)
+        
+        # 若是日內資料，切換為最後一天的走勢
+        if len(df) > 50:
+            df = df[df.index.date == df.index[-1].date()]
+
         mc = mpf.make_marketcolors(up='#ff4d4d', down='#00b300', inherit=True)
         s  = mpf.make_mpf_style(marketcolors=mc)
         buf = io.BytesIO()
         
-        mpf.plot(df, type='line', volume=False, style=s, title=f"{title_name} Intraday", savefig=buf)
+        mpf.plot(df, type='line', volume=False, style=s, title=f"{title_name} Trend", savefig=buf)
         return upload_imgbb(buf)
     except Exception as e:
         return None
@@ -378,11 +389,12 @@ def morning_all_in_one_report():
     messages_to_send = []
     text_lines = ["🌅 【8:50 盤前戰情總匯】\n"]
     
-    text_lines.append("🌎 美股收盤現況：")
-    us_targets = {"^DJI": "道瓊", "^GSPC": "標普", "^IXIC": "那斯達克", "^SOX": "費半"}
+    # 加入美國四大指數
+    text_lines.append("🌎 美股四大指數：")
+    us_targets = {"^DJI": "道瓊指數", "^GSPC": "標普500", "^IXIC": "那斯達克", "^SOX": "費城半導體"}
     for ticker, name in us_targets.items():
         try:
-            df = yf.Ticker(ticker).history(period='2d')
+            df = yf.Ticker(ticker).history(period='5d') # 取5天避免碰到六日無資料報錯
             if len(df) >= 2:
                 tc, pc = df['Close'].iloc[-1], df['Close'].iloc[-2]
                 pp = (tc - pc) / pc * 100
@@ -390,22 +402,20 @@ def morning_all_in_one_report():
                 text_lines.append(f"▪️ {name}: {tc:.2f} ({sp}{pp:+.2f}%)")
         except: continue
 
-    text_lines.append("\n🚀 盤前美股期貨動能：")
-    fut_targets = {
-        "YM=F": {"name": "小道瓊", "sector": "傳統/工業"},
-        "NQ=F": {"name": "小那斯達克", "sector": "科技/半導體"},
-        "ES=F": {"name": "標普500", "sector": "大型權值"}
-    }
-    for ticker, info in fut_targets.items():
+    # 加入日經、韓國指數
+    text_lines.append("\n🌏 亞洲早盤現況：")
+    asian_targets = {"^N225": "日經指數", "^KS11": "韓國指數"}
+    for ticker, name in asian_targets.items():
         try:
-            df = yf.Ticker(ticker).history(period='2d')
+            df = yf.Ticker(ticker).history(period='5d')
             if len(df) >= 2:
                 tc, pc = df['Close'].iloc[-1], df['Close'].iloc[-2]
                 pp = (tc - pc) / pc * 100
-                sp = "🔥 強勢" if pp > 0 else "🔻 偏弱"
-                text_lines.append(f"▪️ {info['name']} ({info['sector']}): {sp} ({pp:+.2f}%)")
+                sp = "🔺" if pp > 0 else "🔻"
+                text_lines.append(f"▪️ {name}: {tc:.2f} ({sp}{pp:+.2f}%)")
         except: continue
 
+    # 保留原有的台指期外資動向籌碼
     text_lines.append("\n🚨 籌碼：外資台指期動向")
     try:
         start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
@@ -427,15 +437,20 @@ def morning_all_in_one_report():
     final_text = "\n".join(text_lines)
     messages_to_send.append(TextSendMessage(text=final_text))
 
-    jp_url = get_intraday_chart_url("^N225", "日經225 (Japan)")
-    if jp_url:
-        messages_to_send.append(ImageSendMessage(original_content_url=jp_url, preview_image_url=jp_url))
-        
-    kr_url = get_intraday_chart_url("^KS11", "韓國KOSPI (Korea)")
-    if kr_url:
-        messages_to_send.append(ImageSendMessage(original_content_url=kr_url, preview_image_url=kr_url))
+    # 一次推播 日經、韓股、費半走勢圖
+    charts_to_generate = [
+        ("^N225", "Nikkei 225"),
+        ("^KS11", "KOSPI"),
+        ("^SOX", "PHLX Semiconductor")
+    ]
+    
+    for ticker, title in charts_to_generate:
+        url = get_intraday_chart_url(ticker, title)
+        if url:
+            messages_to_send.append(ImageSendMessage(original_content_url=url, preview_image_url=url))
 
     try:
+        # LINE Bot 單次 push 上限剛好是 5 則訊息 (1文字 + 3圖片 = 4則，安全過關)
         line_bot_api.push_message(MY_USER_ID, messages_to_send)
     except Exception as e:
         pass
