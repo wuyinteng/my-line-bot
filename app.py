@@ -49,37 +49,49 @@ except Exception as e:
     pass
 
 # ==========================================
-# 🕷️ 2. 神秘金字塔爬蟲 (防衝突極致版)
+# 🕷️ 2. 神秘金字塔爬蟲 (高仿瀏覽器 + 強化容錯版)
 # ==========================================
 def get_chip_from_pyramid(stock_id):
     url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
+    
+    # 偽裝得更像真人瀏覽器，避免被 403 Forbidden 擋下
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://norway.twsthr.info/"
     }
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.encoding = 'utf-8'
+        
+        # 如果不是 200，代表被網站防火牆擋了
+        if response.status_code != 200:
+            print(f"[{stock_id}] Pyramid Error: HTTP 狀態碼 {response.status_code}")
+            return None
+            
         dfs = pd.read_html(StringIO(response.text))
         
         target_df = None
+        # 放寬條件：只要欄位大於 7 個，且內容包含「日期」，就當作是我們要的籌碼表
         for df in dfs:
-            if len(df.columns) > 10 and '日期' in df.to_string():
+            if len(df.columns) >= 7 and '日期' in df.to_string():
                 target_df = df.copy()
                 break
                 
         if target_df is None or target_df.empty: 
+            print(f"[{stock_id}] Pyramid Error: 找不到籌碼表格")
             return None
             
-        # 將欄位名稱重置為數字，徹底避免「比例(%)」名稱重複導致報錯
         target_df.columns = [str(i) for i in range(len(target_df.columns))]
         
         date_col, big_col, retail_col = None, None, None
         
-        # 掃描前 3 列的內容來精準定位所需欄位
+        # 掃描前 4 列來定位欄位 (增加掃描深度)
         for i in range(len(target_df.columns)):
             col_name = str(i)
-            # 將前3列內容合併成字串判斷
-            header_text = " ".join(target_df[col_name].iloc[:3].astype(str).tolist())
+            header_text = " ".join(target_df[col_name].iloc[:4].astype(str).tolist())
             
             if '日期' in header_text:
                 if date_col is None: date_col = col_name
@@ -89,13 +101,13 @@ def get_chip_from_pyramid(stock_id):
                 retail_col = col_name
 
         if not (date_col and big_col and retail_col):
+            print(f"[{stock_id}] Pyramid Error: 抓到表格，但無法精準定位大戶與散戶欄位")
             return None
 
         clean_df = target_df[[date_col, big_col, retail_col]].copy()
         clean_df.columns = ['Date', 'Big_Holder', 'Retail_Holder']
         clean_df = clean_df.dropna()
         
-        # 清理字串與轉換
         clean_df['Date'] = clean_df['Date'].astype(str).str.replace(r'[/\\-]', '', regex=True).str.strip()
         clean_df = clean_df[clean_df['Date'].str.startswith('20')] 
         clean_df['Date'] = pd.to_datetime(clean_df['Date'].str[:8], format='%Y%m%d', errors='coerce')
@@ -104,15 +116,14 @@ def get_chip_from_pyramid(stock_id):
         clean_df['Retail_Holder'] = pd.to_numeric(clean_df['Retail_Holder'].astype(str).str.replace('%', '', regex=False), errors='coerce')
         
         clean_df = clean_df.dropna(subset=['Date', 'Big_Holder']).sort_values('Date').tail(15)
-        
-        # 校正週末日期至週五，對齊交易日
         clean_df['Date'] = clean_df['Date'].apply(lambda d: d - pd.Timedelta(days=d.weekday() - 4) if d.weekday() > 4 else d)
         
         clean_df = clean_df.set_index('Date')
         clean_df.index = clean_df.index.normalize()
         return clean_df
+        
     except Exception as e:
-        print(f"Pyramid Data Error: {e}")
+        print(f"[{stock_id}] Pyramid System Error: {e}")
         return None
 
 # ==========================================
