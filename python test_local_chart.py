@@ -514,7 +514,7 @@ def handle_message(event):
                     ImageSendMessage(original_content_url=url_trend, preview_image_url=url_trend)
                 ])
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片產生失敗。", quick_reply=qr_buttons))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片失敗。", quick_reply=qr_buttons))
         return
         
     result = get_quote(user_msg)
