@@ -120,6 +120,8 @@ def get_chip_from_pyramid(stock_id):
 # ==========================================
 def get_quote(msg):
     msg = msg.upper().strip()
+    
+    # 判斷 1：台股 (純數字，且長度 >= 4)
     if msg.isdigit() and len(msg) >= 4:
         try:
             stock_name = tw_stock_dict.get(msg, "")
@@ -132,9 +134,26 @@ def get_quote(msg):
                 tc, pc = df['close'].iloc[-1], df['close'].iloc[-2]
                 dp, pp = tc - pc, (tc - pc) / pc * 100
                 sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
-                return (f"📊 【股票報價】{name_display}\n"
+                return (f"📊 【台股報價】{name_display}\n"
                         f"▪️ 成交價：{tc:.2f} TWD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
         except: return None
+
+    # 判斷 2：美股 / 指數 (包含英文字母的代碼，如 AAPL, NVDA, ^DJI)
+    elif msg.isalnum() or msg.startswith("^"):
+        try:
+            stock = yf.Ticker(msg)
+            # 取 5 天資料避免遇到假日報錯
+            df = stock.history(period="5d") 
+            if not df.empty and len(df) >= 2:
+                tc, pc = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                dp, pp = tc - pc, (tc - pc) / pc * 100
+                sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
+                return (f"📊 【美股報價】{msg}\n"
+                        f"▪️ 成交價：{tc:.2f} USD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
+            else:
+                return f"找不到美股代碼【{msg}】資料"
+        except: return None
+        
     return None
 
 def get_holding_shares_info(stock_id):
