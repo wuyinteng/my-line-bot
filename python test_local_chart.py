@@ -118,10 +118,20 @@ def get_chip_from_pyramid(stock_id):
 # ==========================================
 # 📈 3. 文字現況報告 (維持全中文)
 # ==========================================
+import requests
+
+# 建立偽裝瀏覽器的 requests session 給 yfinance 使用，防止 Render IP 被 Yahoo 擋下
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
+
 def get_quote(msg):
     msg = msg.upper().strip()
     
-    # 判斷 1：台股 (純數字，且長度 >= 4)
+    # ----------------------------------------------------
+    # 1. 台股查詢 (純數字，長度 >= 4)
+    # ----------------------------------------------------
     if msg.isdigit() and len(msg) >= 4:
         try:
             stock_name = tw_stock_dict.get(msg, "")
@@ -129,31 +139,52 @@ def get_quote(msg):
             start_date = (datetime.datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             df = dl.taiwan_stock_daily(stock_id=msg, start_date=start_date)
             
-            if df.empty: return f"找不到台股【{name_display}】資料"
-            if len(df) >= 2:
+            if not df.empty and len(df) >= 2:
                 tc, pc = df['close'].iloc[-1], df['close'].iloc[-2]
                 dp, pp = tc - pc, (tc - pc) / pc * 100
                 sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
                 return (f"📊 【台股報價】{name_display}\n"
                         f"▪️ 成交價：{tc:.2f} TWD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
-        except: return None
+        except Exception as e:
+            print(f"FinMind 台股查詢異常: {e}")
 
-    # 判斷 2：美股 / 指數 (包含英文字母的代碼，如 AAPL, NVDA, ^DJI)
-    elif msg.isalnum() or msg.startswith("^"):
-        try:
-            stock = yf.Ticker(msg)
-            # 取 5 天資料避免遇到假日報錯
-            df = stock.history(period="5d") 
-            if not df.empty and len(df) >= 2:
-                tc, pc = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                dp, pp = tc - pc, (tc - pc) / pc * 100
-                sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
-                return (f"📊 【美股報價】{msg}\n"
-                        f"▪️ 成交價：{tc:.2f} USD\n▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
-            else:
-                return f"找不到美股代碼【{msg}】資料"
-        except: return None
+    # ----------------------------------------------------
+    # 2. 美股 / 指數查詢 (yfinance fast_info 雙保險模式)
+    # ----------------------------------------------------
+    try:
+        ticker = yf.Ticker(msg, session=yf_session)
         
+        # 優先策略：使用 fast_info (速度極快、不易被擋、盤中直接拿即時/收盤價)
+        fi = ticker.fast_info
+        tc = getattr(fi, 'last_price', None)
+        pc = getattr(fi, 'previous_close', None)
+        
+        # 備用策略：若 fast_info 抓不到，退回使用 history
+        if tc is None or pc is None or np.isnan(tc) or np.isnan(pc):
+            df = ticker.history(period="5d")
+            if not df.empty and len(df) >= 2:
+                tc = float(df['Close'].iloc[-1])
+                pc = float(df['Close'].iloc[-2])
+            elif not df.empty and len(df) == 1:
+                tc = float(df['Close'].iloc[-1])
+                pc = tc
+
+        if tc is not None and pc is not None and not np.isnan(tc):
+            dp = tc - pc
+            pp = (dp / pc * 100) if pc != 0 else 0
+            sp = "🔺" if dp > 0 else ("🔻" if dp < 0 else "➖")
+            currency = getattr(fi, 'currency', 'USD') or 'USD'
+            
+            return (f"📊 【美股/國際報價】{msg}\n"
+                    f"▪️ 成交價：{tc:.2f} {currency}\n"
+                    f"▪️ 漲跌幅：{sp}{dp:+.2f} ({pp:+.2f}%)")
+        else:
+            return f"⚠️ 查無代碼【{msg}】美股資料，請確認代碼是否正確（如 AAPL、NVDA）。"
+
+    except Exception as e:
+        print(f"美股報價查詢報錯 [{msg}]: {e}")
+        return f"⚠️ 查詢【{msg}】失敗，請稍後再試。"
+
     return None
 
 def get_holding_shares_info(stock_id):
@@ -489,40 +520,57 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip().upper()
+
+    # 1. LINE 聊天室 loading 動態動畫
     try: 
         requests.post(
             "https://api.line.me/v2/bot/chat/loading/start", 
             headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"}, 
-            json={"chatId": event.source.user_id, "loadingSeconds": 15}
+            json={"chatId": event.source.user_id, "loadingSeconds": 15},
+            timeout=3
         )
-    except: pass
+    except: 
+        pass
 
-    btn_target = user_msg.replace("K", "").replace("走", "")
-    if btn_target in ["四大指數", "美股指數", "美股四大指數", "INDEX"]: btn_target = "^DJI"
-    if not btn_target: btn_target = "2330"
+    # 2. 解析快捷按鈕目標代碼
+    btn_target = user_msg.replace("K", "").replace("走", "").strip()
+    if btn_target in ["四大指數", "美股指數", "美股四大指數", "INDEX"]: 
+        btn_target = "^DJI"
+    if not btn_target: 
+        btn_target = "2330"
     
     qr_buttons = QuickReply(items=[
         QuickReplyButton(action=MessageAction(label="📊 K線圖", text=f"K{btn_target}")),
         QuickReplyButton(action=MessageAction(label="📈 走勢圖", text=f"走{btn_target}"))
     ])
 
+    # 3. 圖表查詢分流 (開頭為 K 或 走)
     if user_msg.startswith("K") or user_msg.startswith("走"):
         chart_type = "K" if user_msg.startswith("K") else "走"
-        stock_id = user_msg[1:] 
+        stock_id = user_msg[1:].strip()
+        is_tw = stock_id.isdigit()
         stock_name = tw_stock_dict.get(stock_id, stock_id)
         
         if chart_type == "K":
-            quote_text = get_quote(stock_id) or f"查詢【{stock_name}】..."
-            holding_info = get_holding_shares_info(stock_id)
-            reply_text = f"✅ 【{stock_name}】雙圖流分析完成！\n\n{quote_text}{holding_info}"
+            # 取得即時/最新報價
+            quote_text = get_quote(stock_id) or f"📊 代碼：{stock_name}"
+            holding_info = get_holding_shares_info(stock_id) if is_tw else ""
+            
+            reply_header = f"✅ 【{stock_name}】雙圖流分析完成！" if is_tw else f"✅ 【{stock_name}】K線分析完成！"
+            reply_text = f"{reply_header}\n\n{quote_text}{holding_info}"
             
             messages_to_send = [TextSendMessage(text=reply_text, quick_reply=qr_buttons)]
             
+            # K線圖 (台股與美股皆可產出)
             url_kline = generate_kline_vol_chart(stock_id, "K")
-            if url_kline: messages_to_send.append(ImageSendMessage(original_content_url=url_kline, preview_image_url=url_kline))
+            if url_kline: 
+                messages_to_send.append(ImageSendMessage(original_content_url=url_kline, preview_image_url=url_kline))
             
-            url_inst = generate_inst_margin_chart(stock_id)
-            if url_inst: messages_to_send.append(ImageSendMessage(original_content_url=url_inst, preview_image_url=url_inst))
+            # 台股才產出籌碼圖
+            if is_tw:
+                url_inst = generate_inst_margin_chart(stock_id)
+                if url_inst: 
+                    messages_to_send.append(ImageSendMessage(original_content_url=url_inst, preview_image_url=url_inst))
                 
             line_bot_api.reply_message(event.reply_token, messages_to_send[:5])
         else:
@@ -533,12 +581,17 @@ def handle_message(event):
                     ImageSendMessage(original_content_url=url_trend, preview_image_url=url_trend)
                 ])
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片失敗。", quick_reply=qr_buttons))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 走勢圖生成失敗，非交易時段或無分K資料。", quick_reply=qr_buttons))
         return
         
+    # 4. 純文字報價查詢 (包含純台股代碼與美股代碼如 TSLA, NVDA)
     result = get_quote(user_msg)
     if result:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result, quick_reply=qr_buttons))
+    else:
+        # 避免使用者輸入美股代碼時因查詢失敗而呈現完全已讀不回的狀態
+        fallback_msg = f"⚠️ 查無【{user_msg}】報價資料。\n若為美股請確認代碼（例如：NVDA、AAPL、TSLA）。"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=fallback_msg, quick_reply=qr_buttons))
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone="Asia/Taipei")
